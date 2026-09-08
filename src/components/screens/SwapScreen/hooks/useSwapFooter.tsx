@@ -20,7 +20,9 @@ export const useSwapFooter = ({
   isMalicious: boolean;
   isSuspicious: boolean;
   transactionXDR: string | undefined | null;
-  onSettingsPress: () => void;
+  /** Omit to hide the settings control: Swap's settings sheet is scoped to
+   * SWAP_STACK, so a flow outside that stack cannot open it. */
+  onSettingsPress?: () => void;
 }): { renderFooterComponent: () => React.JSX.Element } => {
   const handleCancelSwap = useCallback(() => {
     swapReviewBottomSheetModalRef.current?.dismiss();

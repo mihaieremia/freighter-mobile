@@ -64,3 +64,19 @@ export interface QRScanEvent {
   timeToScan?: number;
   error?: string;
 }
+
+// Earn deposit (XOXNO). No amount/fiat fields by design (product decision,
+// non-negotiable) -- only identifiers, matching payment.completed /
+// swap.completed's shape.
+export interface EarnDepositSuccessEvent {
+  assetCode: string;
+  hubId?: string;
+  apy?: number | null;
+}
+
+export interface EarnDepositErrorEvent {
+  assetCode: string;
+  hubId?: string;
+  apy?: number | null;
+  errorCode?: string;
+}

@@ -1005,6 +1005,12 @@ export interface SimulateTransactionResponse {
 
 export interface SorobanSimulationResponse {
   minResourceFee?: string;
+  /**
+   * The contract's own rejection. Present on a 200 whenever the invocation
+   * simulated but failed — a supply cap, an insolvent position, a stale
+   * oracle — in which case no prepared transaction comes back.
+   */
+  error?: string;
 }
 
 /**

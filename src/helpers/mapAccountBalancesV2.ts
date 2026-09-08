@@ -241,7 +241,7 @@ const mapSep41 = (b: V2Sep41Balance): MappedEntry => ({
   } as SorobanBalance,
 });
 
-// LP shares map to the legacy `<poolId>:lp` entry: no token identity, just
+// LP shares map to the legacy `<hubId>:lp` entry: no token identity, just
 // the share total plus the pool's constituent reserves ({asset, amount}[]),
 // which is the same shape as Horizon's Reserve[] that `getLPShareCode` reads.
 // v2 carries no pool-share limit; emit 0 — no consumer reads it.

@@ -43,13 +43,15 @@
     "message": "Message",
     "linkOpenError": "Unable to open link",
     "authEntry": "Auth Entry",
-    "stellarNetwork": "Stellar Network"
+    "stellarNetwork": "Stellar Network",
+    "back": "Back"
   },
   "home": {
     "title": "Home",
     "buy": "Add",
     "send": "Send",
     "swap": "Swap",
+    "earn": "Earn",
     "actions": {
       "settings": "Settings",
       "myQRCode": "My QR code"
@@ -694,6 +696,109 @@
   "swapTransactionDetails": {
     "swapped": "Swapped"
   },
+  "earnIntro": {
+    "title": "Earn with XOXNO",
+    "subtitle": "Supply assets to XOXNO and earn variable yield.",
+    "variableYield": {
+      "title": "Earn variable yield",
+      "body": "Supply supported assets and earn based on current APY."
+    },
+    "stayInControl": {
+      "title": "Stay in control",
+      "body": "Manage and withdraw your supplied assets from your wallet."
+    }
+  },
+  "earnTokenPicker": {
+    "protocolName": "XOXNO",
+    "heading": "Choose an asset",
+    "subheading": "Supply assets to XOXNO and earn variable yield.",
+    "inYourAccount": "In your account",
+    "supportedTokens": "Supported tokens",
+    "noSupportedAssets": {
+      "title": "No supported assets in your wallet",
+      "body": "Add a supported asset to start earning."
+    },
+    "apyDisclaimer": "APY may change based on protocol conditions.",
+    "error": {
+      "title": "We couldn't load Earn right now",
+      "body": "Earn is temporarily unavailable. Please try again shortly.",
+      "retry": "Try again"
+    }
+  },
+  "earnHubDetails": {
+    "byXoxno": "by XOXNO",
+    "description": "Description",
+    "hubDetails": "Hub Details",
+    "lendingInterest": "Lending Interest",
+    "acceptedTokens": "Accepted tokens",
+    "supplied": "Supplied",
+    "descriptions": {
+      "mainHub": "An isolated liquidity hub. Each hub keeps its own markets and liquidity, so trouble in one never spreads to another. Collateral factors and interest curves are set per market by governance."
+    }
+  },
+  "earnAmount": {
+    "title": "Deposit",
+    "titleWithToken": "Deposit {{tokenCode}}",
+    "depositLabel": "You deposit",
+    "enterAmount": "Enter an amount",
+    "insufficientFunds": "Insufficient funds",
+    "review": "Review deposit",
+    "hubCard": {
+      "currentApy": "Current APY: {{rate}}*",
+      "byXoxno": "by XOXNO",
+      "accessibilityLabel": "View hub details"
+    },
+    "retryBanner": "Transaction failed. Try again.",
+    "networkFeeSheet": {
+      "title": "XLM needed for network fees",
+      "body": "Add XLM to your wallet to continue",
+      "buyWithCoinbase": "Buy with Coinbase",
+      "receive": "Receive XLM"
+    },
+    "errors": {
+      "simulationFailed": "Failed to simulate the deposit. Please try again.",
+      "insufficientBalanceForFee": "Not enough XLM to cover the network fee. Try depositing a smaller amount."
+    }
+  },
+  "earnReview": {
+    "title": "You are depositing",
+    "to": "To",
+    "apy": "Current APY",
+    "position": "Position",
+    "positionValue": "{{before}} → {{after}}",
+    "estMonthlyEarnings": "Monthly earnings (est.)",
+    "estYearlyEarnings": "Yearly earnings (est.)",
+    "monthlyEarningsValue": "{{before}} → {{after}}",
+    "yearlyEarningsValue": "{{before}} → {{after}}",
+    "transactionDetails": "Transaction details",
+    "projectionDisclaimer": "Estimated earnings are projections based on the current rate and may change based on hub activity."
+  },
+  "earnNotEnough": {
+    "title": "Not enough {{tokenCode}}",
+    "bodyWithBuy": "Get {{tokenCode}} to deposit into this hub. Buy or transfer {{tokenCode}} to continue.",
+    "bodySwapOnly": "You'll need {{tokenCode}} to deposit into this hub. Swap or transfer {{tokenCode}} to continue.",
+    "bodyTransferOnly": "You'll need {{tokenCode}} to deposit into this hub. Transfer {{tokenCode}} from another account to continue.",
+    "buy": "Buy {{tokenCode}}",
+    "buyWithCoinbase": "Buy with Coinbase",
+    "swap": "Swap for {{tokenCode}}",
+    "receive": "Receive {{tokenCode}}",
+    "or": "or"
+  },
+  "earnReceiveFunds": {
+    "title": "Receive funds"
+  },
+  "earnProcessing": {
+    "depositing": "Depositing",
+    "deposited": "Deposited!",
+    "to": "to",
+    "closeMessage": "You can close this screen, your transaction should be complete in less than a minute",
+    "viewTransaction": "View transaction",
+    "withdrawing": "Withdrawing",
+    "withdrawn": "Withdrawn!",
+    "from": "from",
+    "repaying": "Repaying",
+    "repaid": "Repaid!"
+  },
   "transactionTokenScreen": {
     "title": "Sending",
     "empty": "No tokens or collectibles to send"
@@ -1059,7 +1164,14 @@
       "cannotSendToSelf": "Cannot send to yourself",
       "invalidDecimals": "Invalid or missing decimals for custom token",
       "invalidFederationMemo": "The federation server returned an invalid memo. Please verify the address and try again.",
-      "recipientIsTokenContract": "Cannot send to the token's own contract"
+      "recipientIsTokenContract": "Cannot send to the token's own contract",
+      "earnNotSupported": "Earn is not available on this network.",
+      "sorobanRpcMissing": "This network has no Soroban RPC configured.",
+      "simulateDepositFailed": "Could not simulate the deposit. Please try again.",
+      "simulateWithdrawFailed": "Could not simulate the withdrawal. Please try again.",
+      "simulateRepayFailed": "Could not simulate the repayment. Please try again.",
+      "fetchEarnOptionsFailed": "Could not load the assets you can supply. Please try again.",
+      "fetchPositionsFailed": "Could not load your positions. Please try again."
     }
   },
   "welcomeBanner": {
@@ -1291,5 +1403,93 @@
     "title": "Cannot run on this device",
     "description": "This device is rooted or jailbroken, which prevents the app from protecting your wallet keys.",
     "disclaimer": "The app is disabled on compromised systems. Install and use it on a device with standard security intact."
+  },
+  "earnSwapFrom": {
+    "title": "Swap from",
+    "searchPlaceholder": "Search token name or address",
+    "yourTokens": "Your tokens",
+    "noResults": "No matching tokens in your wallet."
+  },
+  "earnPositions": {
+    "heading": "Your positions",
+    "subheading": "Assets you have supplied to XOXNO.",
+    "deposit": "Deposit",
+    "empty": {
+      "title": "No positions yet",
+      "body": "Deposit an asset to start earning."
+    },
+    "error": {
+      "title": "We couldn't load your positions",
+      "body": "Positions are temporarily unavailable. Please try again shortly.",
+      "retry": "Try again"
+    },
+    "borrowed": "Borrowed",
+    "repayHint": "Repaying frees up more of this position to withdraw.",
+    "health": "Health",
+    "apy": "APY"
+  },
+  "earnWithdraw": {
+    "titleWithToken": "Withdraw {{tokenCode}}",
+    "label": "You withdraw",
+    "supplied": "Supplied",
+    "amountTooHigh": "Amount is more than you can withdraw",
+    "review": "Review withdrawal",
+    "confirm": "Confirm",
+    "cancel": "Cancel",
+    "to": "To",
+    "yourWallet": "Your wallet",
+    "reviewTitle": "You are withdrawing",
+    "all": "All",
+    "errors": {},
+    "available": "Available",
+    "limitedByDebt": "Limited by this position's debt",
+    "of": "of"
+  },
+  "earnRepay": {
+    "titleWithToken": "Repay {{tokenCode}}",
+    "label": "You repay",
+    "owed": "Owed",
+    "inWallet": "In your wallet",
+    "notEnough": "Not enough {{tokenCode}} in your wallet",
+    "amountTooHigh": "Amount is more than you owe",
+    "review": "Review repayment",
+    "reviewTitle": "You are repaying",
+    "from": "From",
+    "yourWallet": "Your wallet",
+    "clearsDebt": "Clears this debt. Anything over is refunded in the same transaction."
+  },
+  "earnSpoke": {
+    "title": "Where it is held",
+    "sameRate": "All of these earn the same rate. They differ in the terms on which the deposit can back borrowing later.",
+    "collateral": "Collateral up to {{ltv}}, liquidated at {{threshold}}",
+    "unnamed": "Spoke {{id}}",
+    "close": "Close",
+    "change": "Change"
+  },
+  "earnSafety": {
+    "invalidAmount": "Enter a positive amount within the token’s supported precision.",
+    "changed": "Transaction details changed. Review the transaction again.",
+    "expired": "This transaction expired. Review it again.",
+    "insufficientFee": "Not enough available XLM for this transaction’s total fee.",
+    "balancesUnavailable": "Wallet balances are unavailable. Refresh and try again.",
+    "submitFailed": "Transaction failed. Review again to retry.",
+    "withdrawalUnavailable": "Withdrawal is paused because this position’s debt or collateral cannot be valued. Refresh the position to try again. You can still repay known debt.",
+    "quantityUnavailable": "Amount unavailable",
+    "riskUnavailable": "Risk unavailable",
+    "updatingBalances": "Transaction confirmed. Wallet balances and lending positions may take a moment to update. Refreshing will not submit another transaction.",
+    "refresh": "Refresh balances",
+    "refreshFailed": "Balances could not be refreshed. Your transaction remains confirmed.",
+    "partialRepayment": "Your wallet can only fund a partial repayment. Some debt may remain.",
+    "spokeUnavailable": "This spoke no longer accepts that asset. Choose another.",
+    "walletLocked": "The wallet locked before this could be signed. Unlock it and review again.",
+    "accountChanged": "The account or network changed. Review the transaction again.",
+    "signatureRejected": "The transaction could not be signed. Review it again.",
+    "listingChanged": "This market's terms changed while you were deciding. Review it again.",
+    "positionChanged": "The position this would credit changed. Review the deposit again.",
+    "superseded": "A newer quote replaced this one. Review it again.",
+    "envelopeMismatch": "The built transaction does not match this screen. Review it again.",
+    "operationMismatch": "The built transaction does not match the amount shown. Review it again.",
+    "networkRejected": "The network rejected the transaction.",
+    "submitTimedOut": "The network has not answered yet. The transaction may still go through, so check your position before trying again."
   }
 }

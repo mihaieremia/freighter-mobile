@@ -9,9 +9,10 @@
 // derives from `bip39` directly (stellar/freighter#2876), and (2) we need its
 // async `mnemonicToSeed` + `validateMnemonic` here. It is pinned to the same
 // exact version stellar-hd-wallet resolves transitively.
+import { createHmac } from "crypto";
+
 import { Keypair, xdr } from "@stellar/stellar-sdk";
 import { mnemonicToSeed, validateMnemonic } from "bip39";
-import { createHmac } from "crypto";
 
 export const AUTH_SALT = "freighter-auth-v1";
 

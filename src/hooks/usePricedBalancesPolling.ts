@@ -6,6 +6,7 @@ import { useCallback } from "react";
 interface UsePricedBalancesPollingParams {
   publicKey: string;
   network: NETWORKS;
+  refreshOnFocus?: boolean;
 }
 
 /**
@@ -18,6 +19,7 @@ interface UsePricedBalancesPollingParams {
 export const usePricedBalancesPolling = ({
   publicKey,
   network,
+  refreshOnFocus = false,
 }: UsePricedBalancesPollingParams) => {
   const { fetchAccountBalances } = useBalancesStore();
 
@@ -31,5 +33,6 @@ export const usePricedBalancesPolling = ({
   useFocusedPolling({
     onPoll: handlePoll,
     interval: BALANCES_FETCH_POLLING_INTERVAL,
+    refreshOnFocus,
   });
 };

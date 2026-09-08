@@ -6,6 +6,7 @@ import {
 } from "config/constants";
 import { logger } from "config/logger";
 import { PricedBalance } from "config/types";
+import { XoxnoActionParams, XoxnoDepositTarget } from "config/xoxnoTypes";
 import { useDebugStore } from "ducks/debug";
 import { stroopToXlm } from "helpers/formatAmount";
 import { isContractId } from "helpers/soroban";
@@ -14,6 +15,9 @@ import { t } from "i18next";
 import { SimulationTransactionType } from "services/analytics/types";
 import { isHorizonError, signTransaction, submitTx } from "services/stellar";
 import {
+  buildXoxnoDepositTransaction,
+  buildXoxnoRepayTransaction,
+  buildXoxnoWithdrawTransaction,
   buildPaymentTransaction,
   buildSendCollectibleTransaction,
   buildSwapTransaction,
@@ -27,7 +31,52 @@ import { create } from "zustand";
  * Handles native Error instances, ApiError plain objects (from apiFactory),
  * and arbitrary values. Prevents "[object Object]" from reaching the UI.
  */
+/** Long enough for a Soroban diagnostic, short enough to render. */
+const MAX_ERROR_DETAIL_LENGTH = 300;
+
+/** Body keys servers put their explanation under, in the order we trust them. */
+const ERROR_DETAIL_KEYS = ["message", "error", "detail", "title"] as const;
+
+/**
+ * The detail a failed HTTP call carries in its body.
+ *
+ * Axios reports every failure as "Request failed with status code 400" and
+ * hangs the server's own explanation off `response.data` — a simulation
+ * rejection, a malformed-XDR complaint, a rate limit. Reporting only the
+ * generic sentence leaves the user, and the logs, with a status code and
+ * nothing to act on.
+ *
+ * The body is read from BOTH shapes an error can arrive in. `apiFactory`
+ * normalizes every backend failure into an `ApiError`, which carries the body
+ * on `data` and has no `response` at all, so reading only `response.data`
+ * found nothing on the path every Earn screen actually uses — which is why a
+ * rejected repay showed the bare axios sentence.
+ */
+const httpResponseDetail = (error: unknown): string | null => {
+  const source = error as {
+    response?: { data?: unknown };
+    data?: unknown;
+  };
+  const data = source?.response?.data ?? source?.data;
+
+  if (typeof data === "string" && data.trim()) {
+    return data.trim().slice(0, MAX_ERROR_DETAIL_LENGTH);
+  }
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+
+  const record = data as Record<string, unknown>;
+  const detail = ERROR_DETAIL_KEYS.map((key) => record[key]).find(
+    (value): value is string => typeof value === "string" && !!value.trim(),
+  );
+
+  return detail ? detail.trim().slice(0, MAX_ERROR_DETAIL_LENGTH) : null;
+};
+
 const extractErrorMessage = (error: unknown): string => {
+  const detail = httpResponseDetail(error);
+  if (detail) return detail;
   if (error instanceof Error) return error.message;
   if (
     typeof error === "object" &&
@@ -42,6 +91,7 @@ const extractErrorMessage = (error: unknown): string => {
 
 interface TransactionBuilderState {
   transactionXDR: string | null;
+  xoxnoDepositTarget: XoxnoDepositTarget | null;
   signedTransactionXDR: string | null;
   isBuilding: boolean;
   isSubmitting: boolean;
@@ -95,7 +145,28 @@ interface TransactionBuilderState {
     senderAddress: string;
   }) => Promise<string | null>;
 
+  buildXoxnoDepositTransaction: (
+    params: XoxnoActionParams & {
+      hubId: number;
+      spokeId: number;
+      acceptingSpokeIds: number[];
+    },
+  ) => Promise<string | null>;
+
+  buildXoxnoWithdrawTransaction: (
+    params: XoxnoActionParams & {
+      accountId: string;
+      hubId: number;
+      withdrawAll: boolean;
+    },
+  ) => Promise<string | null>;
+
+  buildXoxnoRepayTransaction: (
+    params: XoxnoActionParams & { accountId: string; hubId: number },
+  ) => Promise<string | null>;
+
   signTransaction: (params: {
+    expectedXdr?: string;
     secretKey: string;
     network: NETWORKS;
   }) => string | null;
@@ -110,11 +181,15 @@ const initialState: Omit<
   | "buildTransaction"
   | "buildSwapTransaction"
   | "buildSendCollectibleTransaction"
+  | "buildXoxnoDepositTransaction"
+  | "buildXoxnoWithdrawTransaction"
+  | "buildXoxnoRepayTransaction"
   | "signTransaction"
   | "submitTransaction"
   | "resetTransaction"
 > = {
   transactionXDR: null,
+  xoxnoDepositTarget: null,
   signedTransactionXDR: null,
   isBuilding: false,
   isSubmitting: false,
@@ -130,6 +205,93 @@ const initialState: Omit<
 // Unique id to correlate async responses to the latest request
 const createRequestId = () =>
   `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+/**
+ * Runs one XOXNO build: the same request-id staleness guard every action in
+ * this store uses, plus the Soroban fee reset an invoke needs so the fee UI
+ * never shows a previous build's numbers against this one.
+ *
+ * `minResourceFee` is null when simulation omits it. It is left unknown
+ * rather than coerced to "0", which would understate the real cost.
+ *
+ * The inclusion fee is the builder's rather than the caller's request: the
+ * builder floors it, so re-deriving it here would record a fee lower than the
+ * one the transaction was signed with.
+ */
+const runXoxnoBuild = async (
+  set: (partial: Partial<TransactionBuilderState>) => void,
+  get: () => TransactionBuilderState,
+  {
+    label,
+    build,
+  }: {
+    /** Names the action in the failure log, e.g. "deposit". */
+    label: string;
+    build: () => Promise<{
+      preparedXdr: string;
+      minResourceFee: string | null;
+      inclusionFeeXlm: string;
+      depositTarget?: XoxnoDepositTarget;
+    }>;
+  },
+): Promise<string | null> => {
+  const newRequestId = createRequestId();
+
+  set({
+    isBuilding: true,
+    xoxnoDepositTarget: null,
+    transactionXDR: null,
+    signedTransactionXDR: null,
+    transactionHash: null,
+    error: null,
+    requestId: newRequestId,
+    isSoroban: true,
+    sorobanResourceFeeXlm: null,
+    sorobanInclusionFeeXlm: null,
+  });
+
+  try {
+    const built = await build();
+
+    let sorobanResourceFeeXlm: string | null = null;
+    if (built.minResourceFee) {
+      const resourceFeeBn = new BigNumber(built.minResourceFee);
+      if (!resourceFeeBn.isNaN()) {
+        sorobanResourceFeeXlm = stroopToXlm(resourceFeeBn).toFixed(7);
+      }
+    }
+
+    if (get().requestId === newRequestId) {
+      set({
+        transactionXDR: built.preparedXdr,
+        xoxnoDepositTarget: built.depositTarget ?? null,
+        isBuilding: false,
+        signedTransactionXDR: null,
+        transactionHash: null,
+        sorobanInclusionFeeXlm: built.inclusionFeeXlm,
+        sorobanResourceFeeXlm,
+      });
+    }
+
+    return get().requestId === newRequestId ? built.preparedXdr : null;
+  } catch (error) {
+    logger.error(
+      "TransactionBuilderStore",
+      `Failed to build XOXNO ${label} transaction`,
+      error,
+    );
+
+    if (get().requestId === newRequestId) {
+      set({
+        error: extractErrorMessage(error),
+        isBuilding: false,
+        transactionXDR: null,
+      });
+    }
+
+    return null;
+  }
+};
 
 export const useTransactionBuilderStore = create<TransactionBuilderState>(
   (set, get) => ({
@@ -462,6 +624,26 @@ export const useTransactionBuilderStore = create<TransactionBuilderState>(
       }
     },
 
+    // The three differ only in which builder they call and what a failure is
+    // called in the log; `runXoxnoBuild` carries everything else.
+    buildXoxnoDepositTransaction: (params) =>
+      runXoxnoBuild(set, get, {
+        label: "deposit",
+        build: () => buildXoxnoDepositTransaction(params),
+      }),
+
+    buildXoxnoWithdrawTransaction: (params) =>
+      runXoxnoBuild(set, get, {
+        label: "withdrawal",
+        build: () => buildXoxnoWithdrawTransaction(params),
+      }),
+
+    buildXoxnoRepayTransaction: (params) =>
+      runXoxnoBuild(set, get, {
+        label: "repayment",
+        build: () => buildXoxnoRepayTransaction(params),
+      }),
+
     signTransaction: (params) => {
       try {
         const { forceSignTransactionFailure } = useDebugStore.getState();
@@ -470,8 +652,14 @@ export const useTransactionBuilderStore = create<TransactionBuilderState>(
           throw new Error(t("debug.debugMessages.signFailure"));
         }
 
-        const { transactionXDR } = get();
+        const { transactionXDR, isBuilding } = get();
 
+        if (
+          params.expectedXdr &&
+          (isBuilding || transactionXDR !== params.expectedXdr)
+        ) {
+          throw new Error(t("earnSafety.changed"));
+        }
         if (!transactionXDR) {
           throw new Error("No transaction to sign");
         }

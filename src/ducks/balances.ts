@@ -21,7 +21,8 @@ import { fetchBalances } from "services/backend";
 import { dataStorage } from "services/storage/storageFactory";
 import { create } from "zustand";
 
-// Keep track of the polling interval ID
+// Share matching pending requests so awaited callers receive completed state.
+let activeBalanceFetch: { key: string; promise: Promise<void> } | null = null;
 
 /**
  * Balances State Interface
@@ -42,6 +43,7 @@ import { create } from "zustand";
  * @property {Function} fetchAccountBalances - Function to fetch account balances from the backend
  */
 interface BalancesState {
+  requestId: number;
   balances: BalanceMap;
   pricedBalances: PricedBalanceMap;
   scanResults: Blockaid.TokenBulk.TokenBulkScanResponse["results"];
@@ -298,6 +300,7 @@ const retrieveCustomTokens = async (params: {
  * Handles fetching, storing, and error states for token balances.
  */
 export const useBalancesStore = create<BalancesState>((set, get) => ({
+  requestId: 0,
   balances: {} as BalanceMap,
   pricedBalances: {} as PricedBalanceMap,
   scanResults: {} as Blockaid.TokenBulk.TokenBulkScanResponse["results"],
@@ -309,113 +312,156 @@ export const useBalancesStore = create<BalancesState>((set, get) => ({
   fetchedPublicKey: null,
   fetchedNetwork: null,
   fetchAccountBalances: async (params) => {
-    try {
-      // It can happen that the public key is not available yet during app initialization
-      // In this case, we should early return and wait for the public key to be available
-      // to prevent UI glitches due to balances fetching error
-      if (!params.publicKey) return;
+    if (!params.publicKey) return;
+    const key = JSON.stringify([
+      params.publicKey,
+      params.network,
+      [...(params.contractIds ?? [])].sort(),
+    ]);
+    // An identical fetch already in flight is awaited rather than repeated,
+    // so two callers asking at once make one request.
+    if (activeBalanceFetch?.key === key) {
+      await activeBalanceFetch.promise;
+      return;
+    }
 
-      set({ isLoading: true, error: null });
-
-      const customTokensContractsIds = await retrieveCustomTokens({
-        network: params.network,
-        publicKey: params.publicKey,
+    const promise = (async () => {
+      const requestId = get().requestId + 1;
+      const current = () => get().requestId === requestId;
+      const changed =
+        get().fetchedPublicKey !== params.publicKey ||
+        get().fetchedNetwork !== params.network;
+      set({
+        requestId,
+        ...(changed
+          ? {
+              balances: {},
+              pricedBalances: {},
+              scanResults: {},
+              fetchedPublicKey: null,
+              fetchedNetwork: null,
+              subentryCount: 0,
+              isFunded: false,
+              localOnlyTokenIds: [],
+            }
+          : {}),
       });
+      try {
+        set({ isLoading: true, error: null });
 
-      // Combine provided contract IDs with custom token contract IDs
-      const allContractIds = [
-        ...(params.contractIds || []),
-        ...customTokensContractsIds,
-      ];
-
-      // Fetch balances with combined contract IDs. Read the v2 flag from the
-      // store at call time (not a captured value) so a freshly resolved
-      // Amplitude flag isn't missed — mirrors the token-prices flag below.
-      const { balances, isFunded, subentryCount, localOnlyTokenIds } =
-        await fetchBalances({
-          ...params,
-          contractIds: allContractIds,
-          useV2: useRemoteConfigStore.getState().use_balances_v2,
+        const customTokensContractsIds = await retrieveCustomTokens({
+          network: params.network,
+          publicKey: params.publicKey,
         });
 
-      if (!balances) {
-        throw new Error("No balances returned from API");
+        if (!current()) return;
+
+        // Combine provided contract IDs with custom token contract IDs
+        const allContractIds = [
+          ...(params.contractIds || []),
+          ...customTokensContractsIds,
+        ];
+
+        // Fetch balances with combined contract IDs. Read the v2 flag from the
+        // store at call time (not a captured value) so a freshly resolved
+        // Amplitude flag isn't missed — mirrors the token-prices flag below.
+        const { balances, isFunded, subentryCount, localOnlyTokenIds } =
+          await fetchBalances({
+            ...params,
+            contractIds: allContractIds,
+            useV2: useRemoteConfigStore.getState().use_balances_v2,
+          });
+
+        if (!current()) return;
+        if (!balances) {
+          throw new Error("No balances returned from API");
+        }
+
+        // Set the "raw" balances right away as they don't depend on prices being fetched
+        set({
+          balances,
+          isFunded: isFunded ?? false,
+          subentryCount: subentryCount ?? 0,
+          fetchedPublicKey: params.publicKey,
+          fetchedNetwork: params.network,
+          localOnlyTokenIds: localOnlyTokenIds ?? [],
+        });
+
+        // Get existing state priced balances to preserve price data
+        const statePricedBalances = get().pricedBalances;
+        const pricedBalances = await fetchPricedBalances(
+          (state) => {
+            if (current()) set(state);
+          },
+          balances,
+          statePricedBalances,
+          params,
+        );
+
+        if (!current()) return;
+        const scanResult = extractScanResultsFromBalances(
+          pricedBalances,
+          params.network,
+        );
+
+        // Update scan results in state
+        set((state) => ({
+          scanResults: {
+            ...state.scanResults,
+            ...scanResult.results,
+          },
+        }));
+
+        set({
+          pricedBalances,
+          isLoading: false,
+          error: null,
+        });
+      } catch (error) {
+        if (!current()) return;
+        // Backend API errors come from the axios interceptor as plain ApiError
+        // objects (not Error instances) with the server's reason in `data`.
+        const apiError =
+          typeof error === "object" &&
+          error !== null &&
+          "isNetworkError" in error &&
+          "status" in error
+            ? (error as ApiError)
+            : null;
+
+        const message =
+          apiError?.message ??
+          (error instanceof Error ? error.message : "Failed to fetch balances");
+
+        logApiError(
+          "balances.fetchAccountBalances",
+          "Network unreachable while fetching account balances",
+          "Failed to fetch account balances",
+          error,
+          {
+            network: params.network,
+            // Structured, so sanitizeLogData can redact it for opt-out users —
+            // interpolating it into an error message would bypass the redactor.
+            publicKey: params.publicKey,
+            ...(apiError && {
+              status: apiError.status,
+              isNetworkError: apiError.isNetworkError,
+              responseData: apiError.data,
+            }),
+          },
+        );
+
+        set({
+          error: message,
+          isLoading: false,
+        });
       }
-
-      // Set the "raw" balances right away as they don't depend on prices being fetched
-      set({
-        balances,
-        isFunded: isFunded ?? false,
-        subentryCount: subentryCount ?? 0,
-        fetchedPublicKey: params.publicKey,
-        fetchedNetwork: params.network,
-        localOnlyTokenIds: localOnlyTokenIds ?? [],
-      });
-
-      // Get existing state priced balances to preserve price data
-      const statePricedBalances = get().pricedBalances;
-      const pricedBalances = await fetchPricedBalances(
-        set,
-        balances,
-        statePricedBalances,
-        params,
-      );
-
-      const scanResult = extractScanResultsFromBalances(
-        pricedBalances,
-        params.network,
-      );
-
-      // Update scan results in state
-      set((state) => ({
-        scanResults: {
-          ...state.scanResults,
-          ...scanResult.results,
-        },
-      }));
-
-      set({
-        pricedBalances,
-        isLoading: false,
-        error: null,
-      });
-    } catch (error) {
-      // Backend API errors come from the axios interceptor as plain ApiError
-      // objects (not Error instances) with the server's reason in `data`.
-      const apiError =
-        typeof error === "object" &&
-        error !== null &&
-        "isNetworkError" in error &&
-        "status" in error
-          ? (error as ApiError)
-          : null;
-
-      const message =
-        apiError?.message ??
-        (error instanceof Error ? error.message : "Failed to fetch balances");
-
-      logApiError(
-        "balances.fetchAccountBalances",
-        "Network unreachable while fetching account balances",
-        "Failed to fetch account balances",
-        error,
-        {
-          network: params.network,
-          // Structured, so sanitizeLogData can redact it for opt-out users —
-          // interpolating it into an error message would bypass the redactor.
-          publicKey: params.publicKey,
-          ...(apiError && {
-            status: apiError.status,
-            isNetworkError: apiError.isNetworkError,
-            responseData: apiError.data,
-          }),
-        },
-      );
-
-      set({
-        error: message,
-        isLoading: false,
-      });
+    })();
+    activeBalanceFetch = { key, promise };
+    try {
+      await promise;
+    } finally {
+      if (activeBalanceFetch?.promise === promise) activeBalanceFetch = null;
     }
   },
   getBalances: () => get().balances,

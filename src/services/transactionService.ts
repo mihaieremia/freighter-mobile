@@ -20,6 +20,8 @@ import {
 } from "config/constants";
 import { logger } from "config/logger";
 import { PricedBalance } from "config/types";
+import { getXoxnoControllerId } from "config/xoxno";
+import { XoxnoActionParams, XoxnoDepositTarget } from "config/xoxnoTypes";
 import {
   isNativeAssetId,
   isNativeBalance,
@@ -42,11 +44,18 @@ import {
   getBaseAccount,
   isMuxedAccount,
 } from "helpers/stellar";
+import {
+  xoxnoAmountToUnits,
+  buildXoxnoRepayOp,
+  buildXoxnoSupplyOp,
+  buildXoxnoWithdrawOp,
+} from "helpers/xoxno";
 import { t } from "i18next";
 import { analytics } from "services/analytics";
 import { SimulationTransactionType } from "services/analytics/types";
 import { simulateTokenTransfer, simulateTransaction } from "services/backend";
 import { buildChangeTrustOperation, stellarSdkServer } from "services/stellar";
+import { getXoxnoDepositTarget, getXoxnoEarnOptions } from "services/xoxno";
 
 export interface BuildPaymentTransactionParams {
   tokenAmount: string;
@@ -855,3 +864,297 @@ export const simulateCollectibleTransfer = async ({
     throw error;
   }
 };
+
+interface BuildXoxnoDepositParams extends XoxnoActionParams {
+  /** The hub the asset is listed in. */
+  hubId: number;
+  /** The spoke a new position would open in. */
+  spokeId: number;
+  /** Every spoke that accepts this asset, including `spokeId`. */
+  acceptingSpokeIds: number[];
+}
+
+interface BuildXoxnoTransactionResult {
+  depositTarget?: XoxnoDepositTarget;
+  xdr: string;
+  preparedXdr: string;
+  /**
+   * Resource fee in stroops reported by simulation, or `null` when the
+   * simulation response omits it. `SorobanSimulationResponse.minResourceFee`
+   * is optional; a missing value is left unknown here rather than coerced to
+   * "0" — a zero resource fee would understate the real cost and is
+   * indistinguishable from a genuine zero. Callers render this as "fee
+   * unavailable" rather than a real number.
+   */
+  minResourceFee: string | null;
+  /**
+   * The inclusion fee actually bid, in XLM — the caller's, floored. Returned
+   * rather than re-derived by the caller so the store records the fee this
+   * transaction was signed with instead of the one that was asked for.
+   */
+  inclusionFeeXlm: string;
+}
+
+/**
+ * The least this app will bid to have a lending invocation included.
+ *
+ * The fee on a Stellar transaction is a maximum, not a price: the network
+ * charges the market rate and keeps the difference nowhere, so bidding above
+ * the base fee costs nothing while the network is quiet and buys inclusion
+ * while it is busy. The protocol floor of 100 stroops is what a transaction
+ * offers when nothing has told it otherwise, and it is routinely outbid — a
+ * lending withdrawal refused with tx_insufficient_fee is what prompted this.
+ *
+ * The network's own recommendation still wins whenever it is higher; this is
+ * only the point below which we will not go.
+ */
+const EARN_MIN_INCLUSION_FEE_XLM = "0.00005";
+
+/**
+ * Builds and simulates one XOXNO controller invocation.
+ *
+ * The three entry points differ only in the operation they carry and what
+ * they call a failure, so everything around that — the controller lookup, the
+ * account load, the inclusion-fee-only envelope and the simulation — lives
+ * here once.
+ *
+ * The account is loaded from Horizon rather than soroban-rpc: the app does not
+ * call Soroban RPC directly, which is why simulation goes through the v1
+ * backend's `/simulate-tx` proxy.
+ */
+const buildXoxnoTransaction = async ({
+  senderAddress,
+  network,
+  transactionFee,
+  transactionTimeout,
+  buildOp,
+  simulationErrorMessage,
+}: Pick<
+  XoxnoActionParams,
+  "senderAddress" | "network" | "transactionFee" | "transactionTimeout"
+> & {
+  /** The controller call this transaction carries. */
+  buildOp: (args: {
+    controllerId: string;
+    networkDetails: NetworkDetails;
+  }) => Promise<xdr.Operation> | xdr.Operation;
+  simulationErrorMessage: string;
+}): Promise<BuildXoxnoTransactionResult> => {
+  const networkDetails = mapNetworkToNetworkDetails(network);
+
+  const controllerId = getXoxnoControllerId(networkDetails);
+  if (!controllerId) {
+    throw new Error(t("transaction.errors.earnNotSupported"));
+  }
+  if (!networkDetails.sorobanRpcUrl) {
+    throw new Error(t("transaction.errors.sorobanRpcMissing"));
+  }
+
+  const server = stellarSdkServer(networkDetails.networkUrl);
+  const sourceAccount = await server.loadAccount(senderAddress);
+
+  const inclusionFeeXlm = BigNumber.max(
+    transactionFee,
+    EARN_MIN_INCLUSION_FEE_XLM,
+  ).toFixed();
+
+  const builtTx = new TransactionBuilder(sourceAccount, {
+    // Inclusion fee only — the prepared transaction carries the resource fee
+    // once simulation reports it — and never below the floor above.
+    fee: xlmToStroop(inclusionFeeXlm).toString(),
+    networkPassphrase: networkDetails.networkPassphrase,
+  })
+    .addOperation(await buildOp({ controllerId, networkDetails }))
+    // A finite timeout, unlike the token-transfer helpers' TimeoutInfinite: a
+    // deposit priced against a live APY should expire rather than sit signable.
+    .setTimeout(transactionTimeout)
+    .build();
+
+  const simulation = await simulateTransaction({
+    xdr: builtTx.toXDR(),
+    network_url: networkDetails.sorobanRpcUrl,
+    network_passphrase: networkDetails.networkPassphrase,
+  });
+
+  if (!simulation?.preparedTransaction) {
+    // A 200 with no prepared transaction is the contract rejecting the call —
+    // an insolvent position, a frozen market, a supply cap. Its diagnostic is
+    // the only explanation the user gets, so it is surfaced verbatim.
+    throw new Error(
+      simulation?.simulationResponse?.error || simulationErrorMessage,
+    );
+  }
+
+  return {
+    xdr: builtTx.toXDR(),
+    preparedXdr: simulation.preparedTransaction,
+    minResourceFee: simulation.simulationResponse?.minResourceFee ?? null,
+    inclusionFeeXlm,
+  };
+};
+
+/**
+ * Builds and simulates a XOXNO deposit — `controller.supply` with one
+ * `(hub, asset)` entry.
+ *
+ * The position to credit is resolved here rather than passed in: `supply`
+ * needs an account id and a risk spoke, and building against a stale or absent
+ * one would be rejected on chain. `getXoxnoDepositTarget` reuses the account
+ * already supplying this market, falls back to any account in the pinned
+ * spoke, and otherwise passes "0" to open a fresh position.
+ *
+ * Returns the prepared (assembled) XDR ready to sign, plus `minResourceFee` so
+ * callers can render the fee breakdown.
+ *
+ * The account is loaded from Horizon rather than soroban-rpc: the app does not
+ * call Soroban RPC directly, which is why simulation goes through the v1
+ * backend's `/simulate-tx` proxy.
+ */
+export const buildXoxnoDepositTransaction = async ({
+  senderAddress,
+  hubId,
+  spokeId,
+  acceptingSpokeIds,
+  assetId,
+  amount,
+  decimals,
+  network,
+  transactionFee,
+  transactionTimeout,
+}: BuildXoxnoDepositParams): Promise<BuildXoxnoTransactionResult> => {
+  let depositTarget: XoxnoDepositTarget | undefined;
+  const result = await buildXoxnoTransaction({
+    senderAddress,
+    network,
+    transactionFee,
+    transactionTimeout,
+    simulationErrorMessage: t("transaction.errors.simulateDepositFailed"),
+    buildOp: async ({ controllerId, networkDetails }) => {
+      const options = await getXoxnoEarnOptions({ networkDetails });
+      const current = options.find((option) => option.assetId === assetId);
+      const spoke = current?.offers
+        .find((offer) => offer.hubId === hubId)
+        ?.spokes.find((entry) => entry.id === spokeId);
+      if (
+        !spoke ||
+        current?.decimals !== decimals ||
+        !acceptingSpokeIds.includes(spokeId)
+      )
+        throw new Error(t("earnSafety.listingChanged"));
+      const target = await getXoxnoDepositTarget({
+        publicKey: senderAddress,
+        hubId,
+        assetId,
+        spokeId,
+        acceptingSpokeIds,
+        networkDetails,
+      });
+
+      depositTarget = target;
+      return buildXoxnoSupplyOp({
+        controllerId,
+        publicKey: senderAddress,
+        accountId: target.accountId,
+        spokeId: target.spokeId,
+        hubId,
+        assetId,
+        amount: xoxnoAmountToUnits(amount, decimals),
+      });
+    },
+  });
+  return { ...result, depositTarget };
+};
+
+interface BuildXoxnoWithdrawParams extends XoxnoActionParams {
+  /** The position NFT to withdraw from. */
+  accountId: string;
+  hubId: number;
+  /**
+   * True when the user asked for the whole leg. The contract reads amount 0
+   * as "withdraw everything", which is the only way to empty a leg exactly:
+   * a supply balance accrues with the index between this build and the
+   * ledger that executes it, so a figure computed here is already stale.
+   */
+  withdrawAll: boolean;
+}
+
+/**
+ * Builds and simulates a XOXNO withdrawal — `controller.withdraw` of one
+ * `(hub, asset)` leg, paid back to the position's owner.
+ *
+ * Unlike a deposit, the position is not resolved here: a withdrawal names an
+ * account the caller already holds, and the positions list the user picked
+ * from supplies it. Withdrawing more than the leg holds, or enough to make
+ * the position insolvent, is rejected in simulation and surfaces as the
+ * contract's own error.
+ */
+export const buildXoxnoWithdrawTransaction = async ({
+  senderAddress,
+  accountId,
+  hubId,
+  assetId,
+  amount,
+  decimals,
+  withdrawAll,
+  network,
+  transactionFee,
+  transactionTimeout,
+}: BuildXoxnoWithdrawParams): Promise<BuildXoxnoTransactionResult> =>
+  buildXoxnoTransaction({
+    senderAddress,
+    network,
+    transactionFee,
+    transactionTimeout,
+    simulationErrorMessage: t("transaction.errors.simulateWithdrawFailed"),
+    buildOp: ({ controllerId }) =>
+      buildXoxnoWithdrawOp({
+        controllerId,
+        publicKey: senderAddress,
+        accountId,
+        hubId,
+        assetId,
+        amount: withdrawAll ? "0" : xoxnoAmountToUnits(amount, decimals),
+      }),
+  });
+
+interface BuildXoxnoRepayParams extends XoxnoActionParams {
+  accountId: string;
+  hubId: number;
+}
+
+/**
+ * Builds and simulates a XOXNO repayment — `controller.repay` of one
+ * `(hub, asset)` debt leg, paid from the caller's own balance.
+ *
+ * Repaying more than is owed is safe and is how a debt is cleared exactly:
+ * the pool refunds the excess to the payer within the same transaction. The
+ * screen relies on that when the wallet can cover it, because a debt left at
+ * a few units still blocks a full withdrawal.
+ */
+export const buildXoxnoRepayTransaction = async ({
+  senderAddress,
+  accountId,
+  hubId,
+  assetId,
+  amount,
+  decimals,
+  network,
+  transactionFee,
+  transactionTimeout,
+}: BuildXoxnoRepayParams): Promise<BuildXoxnoTransactionResult> =>
+  buildXoxnoTransaction({
+    senderAddress,
+    network,
+    transactionFee,
+    transactionTimeout,
+    simulationErrorMessage: t("transaction.errors.simulateRepayFailed"),
+    buildOp: ({ controllerId }) =>
+      buildXoxnoRepayOp({
+        controllerId,
+        publicKey: senderAddress,
+        accountId,
+        hubId,
+        assetId,
+        amount: xoxnoAmountToUnits(amount, decimals),
+      }),
+  });

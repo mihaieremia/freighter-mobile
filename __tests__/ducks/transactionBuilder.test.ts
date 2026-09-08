@@ -606,4 +606,82 @@ describe("transactionBuilder Duck", () => {
       expect(transactionService.simulateCollectibleTransfer).toHaveBeenCalled();
     });
   });
+  const withdrawParams = {
+    accountId: "6",
+    hubId: 1,
+    assetId: "CUSDC",
+    amount: "1",
+    decimals: 7,
+    withdrawAll: false,
+    transactionFee: "0.00001",
+    transactionTimeout: 180,
+    network: NETWORKS.TESTNET,
+    senderAddress: mockPublicKey,
+  };
+
+  it("records the inclusion fee the build actually bid, not the one asked for", async () => {
+    // The builder floors a lending inclusion fee, so re-deriving it here from
+    // the request recorded a fee lower than the one that was signed.
+    (
+      transactionService.buildXoxnoWithdrawTransaction as jest.Mock
+    ).mockResolvedValue({
+      preparedXdr: mockPreparedXDR,
+      minResourceFee: "100",
+      inclusionFeeXlm: "0.00005",
+    });
+
+    await store.getState().buildXoxnoWithdrawTransaction(withdrawParams);
+
+    expect(store.getState().sorobanInclusionFeeXlm).toBe("0.00005");
+  });
+
+  describe("error reporting", () => {
+    it("reports the server's own explanation, not axios's status-code sentence", async () => {
+      // Axios turns every failure into "Request failed with status code 400"
+      // and hides the reason in `response.data`. Reporting only the sentence
+      // leaves the user with a number and nothing to act on.
+      (
+        transactionService.buildXoxnoWithdrawTransaction as jest.Mock
+      ).mockRejectedValue(
+        Object.assign(new Error("Request failed with status code 400"), {
+          response: { data: { message: "invalid network_url" } },
+        }),
+      );
+
+      await store.getState().buildXoxnoWithdrawTransaction(withdrawParams);
+
+      expect(store.getState().error).toBe("invalid network_url");
+    });
+
+    // apiFactory normalizes every backend failure into an ApiError, which
+    // carries the body on `data` and has no `response` at all — the shape
+    // every Earn screen actually sees. Reading only `response.data` left a
+    // rejected deposit, withdrawal or repayment showing the bare sentence.
+    it("reads the explanation off a normalized ApiError too", async () => {
+      (
+        transactionService.buildXoxnoWithdrawTransaction as jest.Mock
+      ).mockRejectedValue({
+        message: "Request failed with status code 400",
+        status: 400,
+        data: { error: "simulation failed: HostError: Error(Contract, #10)" },
+        isNetworkError: false,
+      });
+
+      await store.getState().buildXoxnoWithdrawTransaction(withdrawParams);
+
+      expect(store.getState().error).toBe(
+        "simulation failed: HostError: Error(Contract, #10)",
+      );
+    });
+
+    it("falls back to the error's own message when the body carries no detail", async () => {
+      (
+        transactionService.buildXoxnoWithdrawTransaction as jest.Mock
+      ).mockRejectedValue(new Error("Soroban RPC URL is not defined"));
+
+      await store.getState().buildXoxnoWithdrawTransaction(withdrawParams);
+
+      expect(store.getState().error).toBe("Soroban RPC URL is not defined");
+    });
+  });
 });

@@ -8,6 +8,7 @@ export interface PercentageButtonsProps {
   onPress: (percentage: number) => void;
   /** Test ID for the row container (optional). */
   testID?: string;
+  disabled?: boolean;
 }
 
 /**
@@ -19,6 +20,7 @@ export interface PercentageButtonsProps {
 export const PercentageButtons: React.FC<PercentageButtonsProps> = ({
   onPress,
   testID,
+  disabled = false,
 }) => {
   const { t } = useAppTranslation();
   const items = [
@@ -34,12 +36,13 @@ export const PercentageButtons: React.FC<PercentageButtonsProps> = ({
     { value: 100, label: t("transactionAmountScreen.percentageButtons.max") },
   ];
   return (
-    <View testID={testID} className="flex-row gap-[8px] w-full">
+    <View testID={testID} className="flex-row gap-[12px] w-full">
       {items.map(({ value, label }) => (
         <View key={value} className="flex-1">
           <Button
             secondary
             lg
+            disabled={disabled}
             onPress={() => onPress(value)}
             testID={`percentage-${value}`}
           >

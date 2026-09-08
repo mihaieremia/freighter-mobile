@@ -14,7 +14,7 @@ import { DEFAULT_PADDING } from "config/constants";
 import { pxValue } from "helpers/dimensions";
 import useColors from "hooks/useColors";
 import { useKeyboardHeight } from "hooks/useKeyboardHeight";
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { TouchableOpacity, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { track } from "services/analytics/core";
@@ -124,6 +124,24 @@ const BottomSheet: React.FC<BottomSheetProps> = ({
   scrollViewFooterAvoidsKeyboard = true,
   scrollable = false,
 }) => {
+  /**
+   * Closes the sheet if its screen goes away while it is still open.
+   *
+   * A presented sheet is rendered through the modal provider's portal, which
+   * lives above the navigator, and `BottomSheetModal` registers no unmount
+   * handler of its own: nothing tells the provider to let go when the screen
+   * that owns the sheet is popped or replaced. The sheet therefore stays on
+   * screen with nothing behind it, and the next one opens on top of it, so
+   * they pile up and have to be closed one at a time.
+   *
+   * `dismiss` removes the sheet from the provider's queue synchronously, so
+   * this holds even when the close animation cannot finish.
+   */
+  useEffect(() => {
+    const modal = modalRef.current;
+    return () => modal?.dismiss();
+  }, [modalRef]);
+
   if (__DEV__ && scrollable && snapPoints) {
     throw new Error(
       "BottomSheet: `scrollable` and `snapPoints` cannot be used together.",

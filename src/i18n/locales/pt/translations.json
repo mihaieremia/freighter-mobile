@@ -43,13 +43,15 @@
     "tokenId": "ID do Token",
     "linkOpenError": "Não foi possível abrir o link",
     "authEntry": "Entrada de Autorização",
-    "stellarNetwork": "Rede Stellar"
+    "stellarNetwork": "Rede Stellar",
+    "back": "Voltar"
   },
   "home": {
     "title": "Início",
     "buy": "Adicionar",
     "send": "Enviar",
     "swap": "Trocar",
+    "earn": "Render",
     "actions": {
       "settings": "Configurações",
       "myQRCode": "Meu QR code"
@@ -660,6 +662,109 @@
   "swapTransactionDetails": {
     "swapped": "Trocado"
   },
+  "earnIntro": {
+    "title": "Ganhe com a XOXNO",
+    "subtitle": "Forneça ativos à XOXNO e ganhe rendimento variável.",
+    "variableYield": {
+      "title": "Ganhe rendimento variável",
+      "body": "Forneça ativos suportados e ganhe com base na APY atual."
+    },
+    "stayInControl": {
+      "title": "Mantenha o controle",
+      "body": "Gerencie e retire seus ativos fornecidos direto da sua carteira."
+    }
+  },
+  "earnTokenPicker": {
+    "protocolName": "XOXNO",
+    "heading": "Escolha um ativo",
+    "subheading": "Forneça ativos à XOXNO e ganhe rendimento variável.",
+    "inYourAccount": "Na sua conta",
+    "supportedTokens": "Tokens suportados",
+    "noSupportedAssets": {
+      "title": "Nenhum ativo suportado na sua carteira",
+      "body": "Adicione um ativo suportado para começar a ganhar."
+    },
+    "apyDisclaimer": "A APY pode mudar conforme as condições do protocolo.",
+    "error": {
+      "title": "Não foi possível carregar o Earn agora",
+      "body": "O Earn está temporariamente indisponível. Tente novamente em breve.",
+      "retry": "Tentar novamente"
+    }
+  },
+  "earnHubDetails": {
+    "byXoxno": "por XOXNO",
+    "description": "Descrição",
+    "hubDetails": "Detalhes do hub",
+    "lendingInterest": "Juros de empréstimo",
+    "acceptedTokens": "Tokens aceitos",
+    "supplied": "Fornecido",
+    "descriptions": {
+      "mainHub": "Um hub de liquidez isolado. Cada hub mantém seus próprios mercados e liquidez, então um problema em um nunca se espalha para outro. Os fatores de garantia e as curvas de juros são definidos por mercado pela governança."
+    }
+  },
+  "earnAmount": {
+    "title": "Depositar",
+    "titleWithToken": "Depositar {{tokenCode}}",
+    "depositLabel": "Você deposita",
+    "enterAmount": "Insira um valor",
+    "insufficientFunds": "Saldo insuficiente",
+    "review": "Revisar depósito",
+    "hubCard": {
+      "currentApy": "APY atual: {{rate}}*",
+      "byXoxno": "por XOXNO",
+      "accessibilityLabel": "Ver detalhes do hub"
+    },
+    "retryBanner": "A transação falhou. Tente novamente.",
+    "networkFeeSheet": {
+      "title": "XLM necessário para taxas de rede",
+      "body": "Adicione XLM à sua carteira para continuar",
+      "buyWithCoinbase": "Comprar com a Coinbase",
+      "receive": "Receber XLM"
+    },
+    "errors": {
+      "simulationFailed": "Falha ao simular o depósito. Tente novamente.",
+      "insufficientBalanceForFee": "Não há XLM suficiente para cobrir a taxa de rede. Tente depositar um valor menor."
+    }
+  },
+  "earnReview": {
+    "title": "Você está depositando",
+    "to": "Para",
+    "apy": "APY atual",
+    "position": "Posição",
+    "positionValue": "{{before}} → {{after}}",
+    "estMonthlyEarnings": "Ganhos mensais (est.)",
+    "estYearlyEarnings": "Ganhos anuais (est.)",
+    "monthlyEarningsValue": "{{before}} → {{after}}",
+    "yearlyEarningsValue": "{{before}} → {{after}}",
+    "transactionDetails": "Detalhes da transação",
+    "projectionDisclaimer": "Os ganhos estimados são projeções baseadas na taxa atual e podem mudar de acordo com a atividade do hub."
+  },
+  "earnNotEnough": {
+    "title": "{{tokenCode}} insuficiente",
+    "bodyWithBuy": "Obtenha {{tokenCode}} para depositar neste hub. Compre ou transfira {{tokenCode}} para continuar.",
+    "bodySwapOnly": "Você precisará de {{tokenCode}} para depositar neste hub. Troque ou transfira {{tokenCode}} para continuar.",
+    "bodyTransferOnly": "Você precisará de {{tokenCode}} para depositar neste hub. Transfira {{tokenCode}} de outra conta para continuar.",
+    "buy": "Comprar {{tokenCode}}",
+    "buyWithCoinbase": "Comprar com a Coinbase",
+    "swap": "Trocar por {{tokenCode}}",
+    "receive": "Receber {{tokenCode}}",
+    "or": "ou"
+  },
+  "earnReceiveFunds": {
+    "title": "Receber fundos"
+  },
+  "earnProcessing": {
+    "depositing": "Depositando",
+    "deposited": "Depositado!",
+    "to": "para",
+    "closeMessage": "Você pode fechar esta tela, sua transação deve ser concluída em menos de um minuto",
+    "viewTransaction": "Ver transação",
+    "withdrawing": "Sacando",
+    "withdrawn": "Sacado!",
+    "from": "de",
+    "repaying": "Pagando",
+    "repaid": "Pago!"
+  },
   "transactionTokenScreen": {
     "title": "Enviando",
     "empty": "Nenhum token ou colecionável para enviar"
@@ -1059,7 +1164,14 @@
       "cannotSendToSelf": "Não é possível enviar para você mesmo",
       "invalidDecimals": "Decimais inválidos ou ausentes para token personalizado",
       "invalidFederationMemo": "O servidor de federação retornou um memo inválido. Por favor, verifique o endereço e tente novamente.",
-      "recipientIsTokenContract": "Não é possível enviar para o contrato do próprio token"
+      "recipientIsTokenContract": "Não é possível enviar para o contrato do próprio token",
+      "earnNotSupported": "Earn não está disponível nesta rede.",
+      "sorobanRpcMissing": "Esta rede não tem um Soroban RPC configurado.",
+      "simulateDepositFailed": "Não foi possível simular o depósito. Tente novamente.",
+      "simulateWithdrawFailed": "Não foi possível simular o saque. Tente novamente.",
+      "simulateRepayFailed": "Não foi possível simular o pagamento. Tente novamente.",
+      "fetchEarnOptionsFailed": "Não foi possível carregar os ativos disponíveis. Tente novamente.",
+      "fetchPositionsFailed": "Não foi possível carregar suas posições. Tente novamente."
     }
   },
   "welcomeBanner": {
@@ -1291,5 +1403,93 @@
     "title": "Não é possível executar neste dispositivo",
     "description": "Este dispositivo possui root ou jailbreak, o que impede o aplicativo de proteger as chaves da sua carteira.",
     "disclaimer": "O aplicativo está desabilitado em sistemas comprometidos. Instale e use-o em um dispositivo com segurança padrão intacta."
+  },
+  "earnSwapFrom": {
+    "title": "Trocar de",
+    "searchPlaceholder": "Busque pelo nome ou endereço do token",
+    "yourTokens": "Seus tokens",
+    "noResults": "Nenhum token correspondente na sua carteira."
+  },
+  "earnPositions": {
+    "heading": "Suas posições",
+    "subheading": "Ativos que você forneceu à XOXNO.",
+    "deposit": "Depositar",
+    "empty": {
+      "title": "Nenhuma posição ainda",
+      "body": "Deposite um ativo para começar a ganhar."
+    },
+    "error": {
+      "title": "Não foi possível carregar suas posições",
+      "body": "As posições estão temporariamente indisponíveis. Tente novamente em breve.",
+      "retry": "Tentar novamente"
+    },
+    "borrowed": "Emprestado",
+    "repayHint": "Pagar libera mais desta posição para saque.",
+    "health": "Saúde",
+    "apy": "APY"
+  },
+  "earnWithdraw": {
+    "titleWithToken": "Sacar {{tokenCode}}",
+    "label": "Você saca",
+    "supplied": "Fornecido",
+    "amountTooHigh": "O valor é maior do que você pode sacar",
+    "review": "Revisar saque",
+    "confirm": "Confirmar",
+    "cancel": "Cancelar",
+    "to": "Para",
+    "yourWallet": "Sua carteira",
+    "reviewTitle": "Você está sacando",
+    "all": "Tudo",
+    "errors": {},
+    "available": "Disponível",
+    "limitedByDebt": "Limitado pela dívida desta posição",
+    "of": "de"
+  },
+  "earnRepay": {
+    "titleWithToken": "Pagar {{tokenCode}}",
+    "label": "Você paga",
+    "owed": "Devido",
+    "inWallet": "Na sua carteira",
+    "notEnough": "{{tokenCode}} insuficiente na sua carteira",
+    "amountTooHigh": "O valor é maior do que você deve",
+    "review": "Revisar pagamento",
+    "reviewTitle": "Você está pagando",
+    "from": "De",
+    "yourWallet": "Sua carteira",
+    "clearsDebt": "Quita esta dívida. O excedente é devolvido na mesma transação."
+  },
+  "earnSpoke": {
+    "title": "Onde fica",
+    "sameRate": "Todos rendem a mesma taxa. Diferem nas condições em que o depósito pode servir de garantia depois.",
+    "collateral": "Garantia até {{ltv}}, liquidada em {{threshold}}",
+    "unnamed": "Spoke {{id}}",
+    "close": "Fechar",
+    "change": "Alterar"
+  },
+  "earnSafety": {
+    "invalidAmount": "Insira um valor positivo dentro da precisão suportada pelo token.",
+    "changed": "Os detalhes da transação mudaram. Revise a transação novamente.",
+    "expired": "Esta transação expirou. Revise-a novamente.",
+    "insufficientFee": "XLM disponível insuficiente para a taxa total desta transação.",
+    "balancesUnavailable": "Os saldos da carteira estão indisponíveis. Atualize e tente novamente.",
+    "submitFailed": "A transação falhou. Revise novamente para tentar outra vez.",
+    "withdrawalUnavailable": "O saque está pausado porque não é possível avaliar a dívida ou a garantia desta posição. Atualize a posição para tentar novamente. Você ainda pode pagar dívidas com valores conhecidos.",
+    "quantityUnavailable": "Valor indisponível",
+    "riskUnavailable": "Risco indisponível",
+    "updatingBalances": "Transação confirmada. Os saldos e as posições podem demorar um pouco para atualizar. Atualizar não enviará outra transação.",
+    "refresh": "Atualizar saldos",
+    "refreshFailed": "Não foi possível atualizar os saldos. Sua transação permanece confirmada.",
+    "partialRepayment": "Sua carteira só pode financiar um pagamento parcial. Pode restar alguma dívida.",
+    "spokeUnavailable": "Este spoke não aceita mais esse ativo. Escolha outro.",
+    "walletLocked": "A carteira foi bloqueada antes da assinatura. Desbloqueie e revise novamente.",
+    "accountChanged": "A conta ou a rede mudou. Revise a transação novamente.",
+    "signatureRejected": "Não foi possível assinar a transação. Revise-a novamente.",
+    "listingChanged": "Os termos deste mercado mudaram enquanto você decidia. Revise novamente.",
+    "positionChanged": "A posição que receberia este depósito mudou. Revise o depósito novamente.",
+    "superseded": "Uma cotação mais recente substituiu esta. Revise novamente.",
+    "envelopeMismatch": "A transação criada não corresponde a esta tela. Revise novamente.",
+    "operationMismatch": "A transação criada não corresponde ao valor exibido. Revise novamente.",
+    "networkRejected": "A rede rejeitou a transação.",
+    "submitTimedOut": "A rede ainda não respondeu. A transação ainda pode ser processada; verifique sua posição antes de tentar novamente."
   }
 }

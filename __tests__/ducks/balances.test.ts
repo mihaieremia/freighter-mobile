@@ -10,9 +10,10 @@ import {
   BalanceMap,
 } from "config/types";
 import { useBalancesStore } from "ducks/balances";
+import { useHistoryStore } from "ducks/history";
 import { usePricesStore } from "ducks/prices";
 import { useRemoteConfigStore } from "ducks/remoteConfig";
-import { fetchBalances } from "services/backend";
+import { fetchBalances, getAccountHistory } from "services/backend";
 import { dataStorage } from "services/storage/storageFactory";
 
 import { benignTokenScan } from "../../__mocks__/blockaid-response";
@@ -20,6 +21,7 @@ import { benignTokenScan } from "../../__mocks__/blockaid-response";
 // Mock the fetchBalances service and usePricesStore
 jest.mock("services/backend", () => ({
   fetchBalances: jest.fn(),
+  getAccountHistory: jest.fn(),
 }));
 
 jest.mock("services/storage/storageFactory", () => ({
@@ -643,4 +645,362 @@ describe("balances duck", () => {
       expect(keys).not.toContain("XLM");
     });
   });
+  it.each(["response", "prices"])(
+    "keeps the new account when an older %s finishes last",
+    async (stage) => {
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const pricing = jest
+        .fn()
+        .mockImplementationOnce(() =>
+          stage === "prices" ? gate : Promise.resolve(),
+        )
+        .mockResolvedValue(undefined);
+      (usePricesStore.getState as jest.Mock).mockReturnValue(
+        createMockPricesStore({ fetchPricesForBalances: pricing }),
+      );
+      const oldBalance = {
+        ...mockNativeBalance,
+        total: new BigNumber(10),
+        available: new BigNumber(9),
+      };
+      const newBalance = {
+        ...mockNativeBalance,
+        total: new BigNumber(20),
+        available: new BigNumber(19),
+      };
+      mockFetchBalances
+        .mockImplementationOnce(async () => {
+          if (stage === "response") await gate;
+          return { balances: { XLM: oldBalance } };
+        })
+        .mockResolvedValueOnce({ balances: { XLM: newBalance } });
+      let old: Promise<void>;
+      await act(async () => {
+        old = useBalancesStore
+          .getState()
+          .fetchAccountBalances({ ...mockParamsPubnet, publicKey: "old" });
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await useBalancesStore
+          .getState()
+          .fetchAccountBalances({ ...mockParamsPubnet, publicKey: "new" });
+      });
+      await act(async () => {
+        release();
+        await old;
+      });
+      expect(useBalancesStore.getState().fetchedPublicKey).toBe("new");
+      expect(
+        useBalancesStore.getState().pricedBalances.XLM.total.toFixed(),
+      ).toBe("20");
+    },
+  );
+  it("keeps history waiting for a matching in-flight balance refresh", async () => {
+    useBalancesStore.setState({
+      fetchedPublicKey: null,
+      fetchedNetwork: null,
+      isFunded: false,
+    });
+    useHistoryStore.setState({ isFetching: false, rawHistoryData: null });
+    (usePricesStore.getState as jest.Mock).mockReturnValue(
+      createMockPricesStore(),
+    );
+    const historyApi = jest.mocked(getAccountHistory).mockResolvedValue([]);
+    let release: (
+      value: Awaited<ReturnType<typeof fetchBalances>>,
+    ) => void = () => {};
+    mockFetchBalances.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    let historySettled = false;
+    let history: Promise<void>;
+    let poll: Promise<void>;
+    // eslint-disable-next-line @typescript-eslint/require-await
+    await act(async () => {
+      history = useHistoryStore
+        .getState()
+        .fetchAccountHistory(mockParamsPubnet)
+        .then(() => {
+          historySettled = true;
+        });
+      poll = useBalancesStore.getState().fetchAccountBalances(mockParamsPubnet);
+      await Promise.resolve();
+    });
+    const settledBeforeBalance = historySettled;
+    await act(async () => {
+      release({
+        balances: { XLM: mockNativeBalance },
+        isFunded: true,
+        subentryCount: 0,
+      });
+      await Promise.all([history, poll]);
+    });
+    expect(settledBeforeBalance).toBe(false);
+    expect(mockFetchBalances).toHaveBeenCalledTimes(1);
+    expect(historyApi).toHaveBeenCalledTimes(1);
+    expect(
+      useHistoryStore.getState().rawHistoryData?.balances.XLM.total.toFixed(),
+    ).toBe("100.5");
+  });
+
+  it.each(["account", "network", "contractIds"])(
+    "keeps newer %s requests independent and joined after old cleanup",
+    async (change) => {
+      (usePricesStore.getState as jest.Mock).mockReturnValue(
+        createMockPricesStore(),
+      );
+      let releaseOld: (
+        value: Awaited<ReturnType<typeof fetchBalances>>,
+      ) => void = () => {};
+      let releaseNew: (
+        value: Awaited<ReturnType<typeof fetchBalances>>,
+      ) => void = () => {};
+      mockFetchBalances
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            releaseOld = resolve;
+          }),
+        )
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            releaseNew = resolve;
+          }),
+        );
+      const newerParams = {
+        ...mockParamsPubnet,
+        ...(change === "account" ? { publicKey: "another-account" } : {}),
+        ...(change === "network" ? { network: NETWORKS.TESTNET } : {}),
+        ...(change === "contractIds"
+          ? { contractIds: ["another-contract"] }
+          : {}),
+      };
+      let old: Promise<void>;
+      let current: Promise<void>;
+      let joined: Promise<void>;
+      // eslint-disable-next-line @typescript-eslint/require-await
+      await act(async () => {
+        old = useBalancesStore
+          .getState()
+          .fetchAccountBalances(mockParamsPubnet);
+        await Promise.resolve();
+      });
+      // eslint-disable-next-line @typescript-eslint/require-await
+      await act(async () => {
+        current = useBalancesStore.getState().fetchAccountBalances(newerParams);
+        await Promise.resolve();
+      });
+      await act(async () => {
+        releaseOld({ balances: { XLM: mockNativeBalance }, isFunded: true });
+        await old;
+      });
+      // eslint-disable-next-line @typescript-eslint/require-await
+      await act(async () => {
+        joined = useBalancesStore.getState().fetchAccountBalances(newerParams);
+        await Promise.resolve();
+      });
+      const callsBeforeRelease = mockFetchBalances.mock.calls.length;
+      await act(async () => {
+        releaseNew({
+          balances: {
+            XLM: { ...mockNativeBalance, total: new BigNumber(200) },
+          },
+          isFunded: true,
+        });
+        await Promise.all([current, joined]);
+      });
+      expect(callsBeforeRelease).toBe(2);
+      expect(useBalancesStore.getState().fetchedPublicKey).toBe(
+        newerParams.publicKey,
+      );
+      expect(useBalancesStore.getState().fetchedNetwork).toBe(
+        newerParams.network,
+      );
+      expect(useBalancesStore.getState().balances.XLM.total.toFixed()).toBe(
+        "200",
+      );
+    },
+  );
+
+  it("releases a failed shared request so retry fetches again", async () => {
+    (usePricesStore.getState as jest.Mock).mockReturnValue(
+      createMockPricesStore(),
+    );
+    let rejectFetch: (error: Error) => void = () => {};
+    mockFetchBalances.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectFetch = reject;
+      }),
+    );
+    let first: Promise<void>;
+    let joined: Promise<void>;
+    // eslint-disable-next-line @typescript-eslint/require-await
+    await act(async () => {
+      first = useBalancesStore
+        .getState()
+        .fetchAccountBalances(mockParamsPubnet);
+      joined = useBalancesStore
+        .getState()
+        .fetchAccountBalances(mockParamsPubnet);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      rejectFetch(new Error("offline"));
+      await Promise.all([first, joined]);
+    });
+    expect(mockFetchBalances).toHaveBeenCalledTimes(1);
+    expect(useBalancesStore.getState().error).toBe("offline");
+    mockFetchBalances.mockResolvedValueOnce({
+      balances: { XLM: mockNativeBalance },
+      isFunded: true,
+    });
+    await act(async () => {
+      await useBalancesStore.getState().fetchAccountBalances(mockParamsPubnet);
+    });
+    expect(mockFetchBalances).toHaveBeenCalledTimes(2);
+    expect(useBalancesStore.getState().error).toBeNull();
+  });
+
+  it("does not read another account's balances into a superseded history fetch", async () => {
+    (usePricesStore.getState as jest.Mock).mockReturnValue(
+      createMockPricesStore(),
+    );
+    useHistoryStore.setState({ isFetching: false, rawHistoryData: null });
+    const historyApi = jest.mocked(getAccountHistory).mockResolvedValue([]);
+    let releaseOld: (
+      value: Awaited<ReturnType<typeof fetchBalances>>,
+    ) => void = () => {};
+    mockFetchBalances
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          releaseOld = resolve;
+        }),
+      )
+      .mockResolvedValueOnce({
+        balances: { XLM: mockNativeBalance },
+        isFunded: true,
+      });
+    let history: Promise<void>;
+    // eslint-disable-next-line @typescript-eslint/require-await
+    await act(async () => {
+      history = useHistoryStore
+        .getState()
+        .fetchAccountHistory(mockParamsPubnet);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await useBalancesStore.getState().fetchAccountBalances({
+        ...mockParamsPubnet,
+        publicKey: "another-account",
+      });
+    });
+    await act(async () => {
+      releaseOld({ balances: { XLM: mockNativeBalance }, isFunded: true });
+      await history;
+    });
+    expect(historyApi).not.toHaveBeenCalled();
+    expect(useHistoryStore.getState().rawHistoryData).toBeNull();
+    expect(useHistoryStore.getState().isFetching).toBe(false);
+  });
+
+  it.each(["balances", "history", "error"])(
+    "keeps newer history loading when an older %s request settles",
+    async (stage) => {
+      (usePricesStore.getState as jest.Mock).mockReturnValue(
+        createMockPricesStore(),
+      );
+      useHistoryStore.setState({
+        isFetching: false,
+        isLoading: false,
+        rawHistoryData: null,
+        error: null,
+      });
+      let started = () => {};
+      const oldStarted = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      let releaseOld = () => {};
+      let releaseNew = () => {};
+      const balanceResponse = {
+        balances: { XLM: mockNativeBalance },
+        isFunded: true,
+      };
+      mockFetchBalances
+        .mockImplementationOnce(() => {
+          if (stage !== "balances") return Promise.resolve(balanceResponse);
+          return new Promise((resolve) => {
+            releaseOld = () => resolve(balanceResponse);
+            started();
+          });
+        })
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              releaseNew = () => resolve(balanceResponse);
+            }),
+        );
+      const historyApi = jest.mocked(getAccountHistory).mockResolvedValue([]);
+      if (stage !== "balances") {
+        historyApi.mockImplementationOnce(
+          () =>
+            new Promise((resolve, reject) => {
+              releaseOld = () => {
+                if (stage === "error") reject(new Error("old failure"));
+                else resolve([]);
+              };
+              started();
+            }),
+        );
+      }
+      let oldHistory: Promise<void>;
+      let newHistory: Promise<void>;
+      await act(async () => {
+        oldHistory = useHistoryStore
+          .getState()
+          .fetchAccountHistory(mockParamsPubnet);
+        await oldStarted;
+      });
+      await act(async () => {
+        // Account switching clears the old store before the next fetch starts.
+        useHistoryStore.setState({ isFetching: false, isLoading: false });
+        newHistory = useHistoryStore.getState().fetchAccountHistory({
+          ...mockParamsPubnet,
+          publicKey: "another-account",
+        });
+        await Promise.resolve();
+      });
+      await act(async () => {
+        releaseOld();
+        await oldHistory;
+      });
+      expect(useHistoryStore.getState()).toMatchObject({
+        isFetching: true,
+        isLoading: true,
+        rawHistoryData: null,
+        error: null,
+      });
+      await act(async () => {
+        releaseNew();
+        await newHistory;
+      });
+      expect(historyApi).toHaveBeenLastCalledWith(
+        expect.objectContaining({ publicKey: "another-account" }),
+      );
+      expect(useHistoryStore.getState()).toMatchObject({
+        isFetching: false,
+        isLoading: false,
+        rawHistoryData: {
+          balances: balanceResponse.balances,
+          rawOperations: [],
+        },
+        error: null,
+      });
+    },
+  );
 });

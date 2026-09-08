@@ -11,9 +11,11 @@ import {
 import { BigNumber } from "bignumber.js";
 import { NETWORKS, mapNetworkToNetworkDetails } from "config/constants";
 import { TokenTypeWithCustomToken, type PricedBalance } from "config/types";
+import { buildXoxnoSupplyOp } from "helpers/xoxno";
 import { analytics } from "services/analytics";
 import * as backend from "services/backend";
 import {
+  buildXoxnoDepositTransaction,
   buildPaymentTransaction,
   buildSendCollectibleTransaction,
   BuildSendCollectibleParams,
@@ -23,6 +25,7 @@ import {
   simulateCollectibleTransfer,
   validateSendCollectibleTransactionParams,
 } from "services/transactionService";
+import { getXoxnoDepositTarget, getXoxnoEarnOptions } from "services/xoxno";
 
 // Hoisted so it can be reconfigured per test (e.g. to simulate an unfunded
 // destination) while defaulting to the always-succeed behavior the rest of
@@ -34,6 +37,16 @@ const mockLoadAccount = jest.fn((publicKey: string) =>
     incrementSequenceNumber: jest.fn(),
   }),
 );
+
+jest.mock("helpers/xoxno", () => {
+  const actual = jest.requireActual("helpers/xoxno");
+  return { ...actual, buildXoxnoSupplyOp: jest.fn(actual.buildXoxnoSupplyOp) };
+});
+
+jest.mock("services/xoxno", () => ({
+  getXoxnoDepositTarget: jest.fn(),
+  getXoxnoEarnOptions: jest.fn(),
+}));
 
 jest.mock("services/stellar", () => ({
   ...jest.requireActual("services/stellar"),
@@ -749,5 +762,148 @@ describe("buildSwapTransaction — includeTrustline", () => {
     expect(tx.operations[0].type).toBe("pathPaymentStrictSend");
     // Single op: total == the user-set 0.001 XLM (10,000 stroops).
     expect(tx.fee).toBe("10000");
+  });
+});
+
+describe("buildXoxnoDepositTransaction", () => {
+  const USDC_SAC = "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75";
+  const SENDER = "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H";
+  const mockPreparedXdr = "mock_prepared_xoxno_xdr";
+
+  const baseParams = {
+    senderAddress: SENDER,
+    hubId: 1,
+    spokeId: 1,
+    acceptingSpokeIds: [1],
+    assetId: USDC_SAC,
+    amount: "500",
+    decimals: 7,
+    network: NETWORKS.PUBLIC,
+    transactionFee: "0.00001",
+    transactionTimeout: 180,
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (getXoxnoEarnOptions as jest.Mock).mockResolvedValue([
+      {
+        assetId: baseParams.assetId,
+        decimals: baseParams.decimals,
+        offers: [
+          { hubId: baseParams.hubId, spokes: [{ id: baseParams.spokeId }] },
+        ],
+      },
+    ]);
+    (getXoxnoDepositTarget as jest.Mock).mockResolvedValue({
+      accountId: "6",
+      spokeId: 1,
+      suppliedTokens: "25",
+    });
+    (backend.simulateTransaction as jest.Mock).mockResolvedValue({
+      preparedTransaction: mockPreparedXdr,
+      simulationResponse: { minResourceFee: "546395" },
+    });
+  });
+
+  it("rejects a network with no XOXNO deployment", async () => {
+    await expect(
+      buildXoxnoDepositTransaction({
+        ...baseParams,
+        network: NETWORKS.FUTURENET,
+      }),
+    ).rejects.toThrow("transaction.errors.earnNotSupported");
+  });
+
+  it("supplies into the pinned hub with the amount scaled into base units", async () => {
+    // 500 USDC at 7 decimals. An i128 cannot carry a fraction and exponential
+    // notation would not parse, so the scaled value must be a plain integer
+    // string.
+    await buildXoxnoDepositTransaction(baseParams);
+
+    expect(buildXoxnoSupplyOp).toHaveBeenCalledWith(
+      expect.objectContaining({
+        publicKey: SENDER,
+        assetId: USDC_SAC,
+        hubId: 1,
+        amount: "5000000000",
+      }),
+    );
+    expect(
+      (buildXoxnoSupplyOp as jest.Mock).mock.calls[0][0].amount,
+    ).not.toMatch(/[.e+]/);
+  });
+
+  it("credits the account the target resolver picked, in that account's spoke", async () => {
+    // A reused position must belong to the explicitly selected spoke.
+    await buildXoxnoDepositTransaction(baseParams);
+
+    expect(getXoxnoDepositTarget).toHaveBeenCalledWith(
+      expect.objectContaining({ publicKey: SENDER, hubId: 1, spokeId: 1 }),
+    );
+    expect(buildXoxnoSupplyOp).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: "6", spokeId: 1 }),
+    );
+  });
+
+  it("revalidates that the selected spoke still accepts this deposit", async () => {
+    (getXoxnoEarnOptions as jest.Mock).mockResolvedValue([]);
+    await expect(buildXoxnoDepositTransaction(baseParams)).rejects.toThrow();
+    expect(backend.simulateTransaction).not.toHaveBeenCalled();
+  });
+
+  it("returns the prepared XDR and the simulated resource fee", async () => {
+    const result = await buildXoxnoDepositTransaction(baseParams);
+
+    expect(result.preparedXdr).toBe(mockPreparedXdr);
+    expect(result.minResourceFee).toBe("546395");
+
+    const parsedTx = TransactionBuilder.fromXDR(
+      result.xdr,
+      Networks.PUBLIC,
+    ) as Transaction;
+    expect(parsedTx.operations).toHaveLength(1);
+    // The inclusion fee is the caller's, floored: 0.00001 XLM would be the
+    // protocol minimum of 100 stroops, which the network outbids under load,
+    // so a lending invocation never offers less than 500.
+    expect(parsedTx.fee).toBe("500");
+    expect(result.inclusionFeeXlm).toBe("0.00005");
+  });
+
+  it("keeps a higher fee the caller asked for", async () => {
+    const result = await buildXoxnoDepositTransaction({
+      ...baseParams,
+      transactionFee: "0.001",
+    });
+
+    const parsedTx = TransactionBuilder.fromXDR(
+      result.xdr,
+      Networks.PUBLIC,
+    ) as Transaction;
+    expect(parsedTx.fee).toBe("10000");
+  });
+
+  it("returns minResourceFee as null when the simulation response omits it", async () => {
+    (backend.simulateTransaction as jest.Mock).mockResolvedValue({
+      preparedTransaction: mockPreparedXdr,
+      simulationResponse: {},
+    });
+
+    const result = await buildXoxnoDepositTransaction(baseParams);
+
+    // A missing minResourceFee is left unknown (null), never coerced to "0" —
+    // a zero resource fee would understate the real cost and is
+    // indistinguishable from a genuine zero.
+    expect(result.minResourceFee).toBeNull();
+  });
+
+  it("throws a plain error when simulation succeeds with no prepared transaction", async () => {
+    (backend.simulateTransaction as jest.Mock).mockResolvedValue({
+      preparedTransaction: undefined,
+      simulationResponse: {},
+    });
+
+    await expect(buildXoxnoDepositTransaction(baseParams)).rejects.toThrow(
+      /simulate/i,
+    );
   });
 });

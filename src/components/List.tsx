@@ -96,7 +96,13 @@ export const List: React.FC<ListProps> = ({
             )}
           </View>
           {item.trailingContent && (
-            <View className={item.description ? "mt-1" : ""}>
+            // Capped and shrinkable so a long value wraps within its own
+            // column instead of squeezing the title to a few characters a
+            // line: the title is `flex-1` with a zero basis, so it only ever
+            // gets the space this side leaves behind.
+            <View
+              className={`shrink max-w-[60%] ${item.description ? "mt-1" : ""}`}
+            >
               {item.trailingContent}
             </View>
           )}

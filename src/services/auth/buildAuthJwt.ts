@@ -1,5 +1,6 @@
-import { Keypair, xdr } from "@stellar/stellar-sdk";
 import { createHash } from "crypto";
+
+import { Keypair, xdr } from "@stellar/stellar-sdk";
 
 export const ISS = "freighter-mobile";
 export const JWT_LIFETIME_SECONDS = 15;

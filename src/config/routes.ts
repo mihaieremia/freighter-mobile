@@ -48,6 +48,7 @@ export const ROOT_NAVIGATOR_ROUTES = {
   BUY_XLM_STACK: "BuyXLMStack",
   SEND_PAYMENT_STACK: "SendPaymentStack",
   SWAP_STACK: "SwapStack",
+  EARN_STACK: "EarnStack",
   MANAGE_TOKENS_STACK: "ManageAssetsStack",
   MANAGE_WALLETS_STACK: "ManageWalletsStack",
   // This screen can be called on both stacks.
@@ -120,6 +121,14 @@ export const SWAP_ROUTES = {
   SWAP_AMOUNT_SCREEN: "SwapAmountScreen",
 } as const;
 
+export const EARN_ROUTES = {
+  EARN_POSITIONS_SCREEN: "EarnPositionsScreen",
+  EARN_TOKEN_PICKER_SCREEN: "EarnTokenPickerScreen",
+  EARN_AMOUNT_SCREEN: "EarnAmountScreen",
+  EARN_WITHDRAW_SCREEN: "EarnWithdrawScreen",
+  EARN_REPAY_SCREEN: "EarnRepayScreen",
+} as const;
+
 /**
  * ALL_ROUTE_OBJECTS - Centralized export for analytics
  *
@@ -140,6 +149,7 @@ export const ALL_ROUTES_OBJECT = [
   ADD_FUNDS_ROUTES,
   SEND_PAYMENT_ROUTES,
   SWAP_ROUTES,
+  EARN_ROUTES,
 ] as const;
 
 export type RootStackParamList = {
@@ -159,6 +169,7 @@ export type RootStackParamList = {
   [ROOT_NAVIGATOR_ROUTES.BUY_XLM_STACK]: NavigatorScreenParams<AddFundsStackParamList>;
   [ROOT_NAVIGATOR_ROUTES.SEND_PAYMENT_STACK]: NavigatorScreenParams<SendPaymentStackParamList>;
   [ROOT_NAVIGATOR_ROUTES.SWAP_STACK]: NavigatorScreenParams<SwapStackParamList>;
+  [ROOT_NAVIGATOR_ROUTES.EARN_STACK]: NavigatorScreenParams<EarnStackParamList>;
   [ROOT_NAVIGATOR_ROUTES.TOKEN_DETAILS_SCREEN]: {
     tokenId: string;
     tokenSymbol: string;
@@ -264,5 +275,47 @@ export type SwapStackParamList = {
   [SWAP_ROUTES.SWAP_AMOUNT_SCREEN]: {
     tokenId: string;
     tokenSymbol: string;
+  };
+};
+
+export type EarnStackParamList = {
+  [EARN_ROUTES.EARN_POSITIONS_SCREEN]: undefined;
+  [EARN_ROUTES.EARN_TOKEN_PICKER_SCREEN]: undefined;
+  [EARN_ROUTES.EARN_AMOUNT_SCREEN]: {
+    /** The reserve's asset contract address. */
+    assetId: string;
+    tokenCode: string;
+  };
+  [EARN_ROUTES.EARN_WITHDRAW_SCREEN]: {
+    /** The position NFT holding the leg; `withdraw` takes it. */
+    accountId: string;
+    hubId: number;
+    /** The hub's display name, shown on the terminal screen. */
+    hubName: string;
+    /** The market's asset contract address. */
+    assetId: string;
+    tokenCode: string;
+    decimals: number;
+    /** The leg's supplied balance, in the asset's base units. */
+    suppliedTokens: string;
+    /**
+     * The most this leg can release while the position stays solvent, in base
+     * units. Equals `suppliedTokens` with no debt; null when the position is
+     * unpriced and no bound is knowable.
+     */
+    withdrawableTokens: string | null;
+    apy: number | null;
+  };
+  [EARN_ROUTES.EARN_REPAY_SCREEN]: {
+    /** The position NFT whose debt this repays. */
+    accountId: string;
+    hubId: number;
+    hubName: string;
+    /** The borrowed asset's contract address. */
+    assetId: string;
+    tokenCode: string;
+    decimals: number;
+    /** What the leg owes, in the asset's base units. */
+    borrowedTokens: string;
   };
 };

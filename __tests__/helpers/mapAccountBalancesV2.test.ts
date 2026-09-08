@@ -234,7 +234,7 @@ describe("mapAccountBalancesV2", () => {
   });
 
   describe("liquidity pool", () => {
-    it("maps to a `<poolId>:lp` entry with reserves and share total", () => {
+    it("maps to a `<hubId>:lp` entry with reserves and share total", () => {
       const result = mapAccountBalancesV2(makeAccount([lpBalance]));
       const entry = result.balances["abc123poolid:lp"] as any;
 

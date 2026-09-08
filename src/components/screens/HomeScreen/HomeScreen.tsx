@@ -19,7 +19,11 @@ import ManageAccounts from "components/screens/HomeScreen/ManageAccounts";
 import WelcomeBannerBottomSheet from "components/screens/HomeScreen/WelcomeBannerBottomSheet";
 import Icon from "components/sds/Icon";
 import { Display } from "components/sds/Typography";
-import { DEFAULT_PADDING, NATIVE_TOKEN_CODE } from "config/constants";
+import {
+  DEFAULT_PADDING,
+  NATIVE_TOKEN_CODE,
+  mapNetworkToNetworkDetails,
+} from "config/constants";
 import {
   MainTabStackParamList,
   MAIN_TAB_ROUTES,
@@ -29,8 +33,10 @@ import {
   ADD_FUNDS_ROUTES,
   SEND_PAYMENT_ROUTES,
   SWAP_ROUTES,
+  EARN_ROUTES,
 } from "config/routes";
 import { TokenTypeWithCustomToken } from "config/types";
+import { isEarnSupportedNetwork } from "config/xoxno";
 import { useAccountsFiatTotalsStore } from "ducks/accountsFiatTotals";
 import { useAuthenticationStore } from "ducks/auth";
 import { useBalancesStore } from "ducks/balances";
@@ -147,6 +153,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(
       showEmptyStateCta && isCollectiblesGridEmpty
     );
 
+    // Earn is gated purely on network support (a XOXNO deployment) —
+    // there is deliberately no feature flag alongside it.
+    const earnEnabled = isEarnSupportedNetwork(
+      mapNetworkToNetworkDetails(network),
+    );
+
     const handleManageAccountsPress = useCallback(() => {
       manageAccountsBottomSheetRef.current?.present();
     }, []);
@@ -253,6 +265,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(
       navigation.navigate(ROOT_NAVIGATOR_ROUTES.SWAP_STACK, {
         screen: SWAP_ROUTES.SWAP_AMOUNT_SCREEN,
         params: { tokenId: NATIVE_TOKEN_CODE, tokenSymbol: NATIVE_TOKEN_CODE },
+      });
+    }, [navigation]);
+
+    const handleEarnPress = useCallback(() => {
+      navigation.navigate(ROOT_NAVIGATOR_ROUTES.EARN_STACK, {
+        screen: EARN_ROUTES.EARN_POSITIONS_SCREEN,
       });
     }, [navigation]);
 
@@ -407,6 +425,15 @@ export const HomeScreen: React.FC<HomeScreenProps> = React.memo(
                 disabled={hasZeroBalance}
                 onPress={handleSwapPress}
                 testID="icon-button-swap"
+              />
+            )}
+            {earnEnabled && (
+              <HomeActionButton
+                Icon={Icon.Asterisk01}
+                title={t("home.earn")}
+                disabled={hasZeroBalance}
+                onPress={handleEarnPress}
+                testID="icon-button-earn"
               />
             )}
           </View>

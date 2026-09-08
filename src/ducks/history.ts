@@ -19,6 +19,7 @@ import { getAccountHistory } from "services/backend";
 import { create } from "zustand";
 
 let pollingIntervalId: NodeJS.Timeout | null = null;
+let historyRequestId = 0;
 
 /**
  * History Item Operation Type
@@ -188,24 +189,24 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
   isFetching: false,
 
   fetchAccountHistory: async (params) => {
+    if (!params.publicKey) {
+      logger.info("fetchAccountHistory", "No public key provided");
+      return;
+    }
+
+    // Prevent duplicate concurrent requests.
+    if (get().isFetching) {
+      logger.info(
+        "fetchAccountHistory",
+        "Request already in progress, skipping",
+      );
+      return;
+    }
+
+    historyRequestId += 1;
+    const requestId = historyRequestId;
+    const current = () => requestId === historyRequestId && get().isFetching;
     try {
-      if (!params.publicKey) {
-        // Pre-call guardrail; caller has already returned early or
-        // shown an empty state. Not error-adjacent.
-        logger.info("fetchAccountHistory", "No public key provided");
-        return;
-      }
-
-      // Prevent duplicate concurrent requests
-      if (get().isFetching) {
-        logger.info(
-          "fetchAccountHistory",
-          "Request already in progress, skipping",
-        );
-
-        return;
-      }
-
       set({ isFetching: true });
 
       if (params.hasRecentTransaction) {
@@ -225,7 +226,17 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
         network: params.network,
       });
 
-      const { isFunded } = useBalancesStore.getState();
+      if (!current()) return;
+      const { isFunded, fetchedPublicKey, fetchedNetwork } =
+        useBalancesStore.getState();
+      // A superseded account/network request has no snapshot for this history fetch.
+      if (
+        fetchedPublicKey !== params.publicKey ||
+        fetchedNetwork !== params.network
+      ) {
+        set({ isLoading: false, isFetching: false });
+        return;
+      }
       if (!isFunded) {
         logger.info(
           "fetchAccountHistory",
@@ -251,6 +262,7 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
         networkDetails,
       });
 
+      if (!current()) return;
       const balances = getBalances();
       const rawHistoryData: RawHistoryData = {
         balances,
@@ -266,6 +278,7 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
         hasRecentTransaction: false,
       });
     } catch (error) {
+      if (!current()) return;
       const errorMessage =
         error instanceof Error ? error.message : "Failed to fetch history";
 

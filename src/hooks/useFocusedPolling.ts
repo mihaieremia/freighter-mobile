@@ -1,5 +1,6 @@
 import { useFocusEffect } from "@react-navigation/native";
 import { useCallback, useRef, useEffect } from "react";
+import { AppState } from "react-native";
 
 interface UseFocusedPollingParams {
   /**
@@ -10,6 +11,7 @@ interface UseFocusedPollingParams {
    * Polling interval in milliseconds
    */
   interval: number;
+  refreshOnFocus?: boolean;
 }
 
 /**
@@ -26,6 +28,7 @@ interface UseFocusedPollingParams {
 export const useFocusedPolling = ({
   onPoll,
   interval,
+  refreshOnFocus = false,
 }: UseFocusedPollingParams) => {
   const lastPollTimeRef = useRef<number>(0); // Start at 0 to ensure immediate fetch on first load
   const remainingTimeRef = useRef<number>(interval);
@@ -95,7 +98,18 @@ export const useFocusedPolling = ({
 
       clearAllTimers();
 
-      if (timeSinceLastPoll >= interval) {
+      // Only callers that asked for a refresh on focus also want one when the
+      // app returns from the background. Left ungated this would change every
+      // existing caller — the balances polling behind the tab bar included —
+      // into a hard refetch on every foreground.
+      const subscription = refreshOnFocus
+        ? AppState.addEventListener("change", (state) => {
+            if (state === "active") startPolling(true);
+            else clearAllTimers();
+          })
+        : null;
+
+      if (refreshOnFocus || timeSinceLastPoll >= interval) {
         remainingTimeRef.current = interval;
         // start polling true = immediate fetch because timeSinceLastPoll is greater than interval
         startPolling(true);
@@ -128,9 +142,13 @@ export const useFocusedPolling = ({
         // start polling false = no immediate fetch because timeSinceLastPoll is less than interval
         startPolling(false);
       }
-      return handleUnfocus;
+      return () => {
+        subscription?.remove();
+        handleUnfocus();
+      };
     }, [
       startPolling,
+      refreshOnFocus,
       interval,
       clearAllTimers,
       handleUnfocus,
