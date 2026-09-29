@@ -116,6 +116,7 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
   const { transactionXDR, transactionHash } = useTransactionBuilderStore();
 
   const swapReviewBottomSheetModalRef = useRef<BottomSheetModal>(null);
+  const reviewPreparationRef = useRef(0);
   // Review-side security sheet — its Proceed Anyway submits a tx. The
   // trending-detail security sheet is owned by useTrendingTokenDetail and
   // kept structurally separate so the two can't share a proceed handler.
@@ -577,14 +578,30 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
   });
 
   const prepareSwapTransaction = useCallback(
-    async (shouldPresent = false) => {
+    async (
+      shouldPresent = false,
+      keyboardDismissed: Promise<void> = Promise.resolve(),
+    ) => {
+      reviewPreparationRef.current += 1;
+      const preparation = reviewPreparationRef.current;
       // Latch the CTA's loading state for the entire prepare + present
       // span so the spinner stays continuous through the sheet's mount
       // animation. Cleared by the sheet's onChange below (index >= 0)
       // or in the catch path.
-      if (shouldPresent) setIsOpeningReviewSheet(true);
+      setIsOpeningReviewSheet(shouldPresent);
       try {
         const setup = await setupSwapTransaction();
+        await keyboardDismissed;
+        if (reviewPreparationRef.current !== preparation) return;
+        if (
+          !setup ||
+          useSwapStore.getState().pathResult !== setup.quote ||
+          useTransactionBuilderStore.getState().transactionXDR !==
+            setup.transactionXDR
+        ) {
+          setIsOpeningReviewSheet(false);
+          return;
+        }
 
         if (shouldPresent) {
           // Decide the gate from the FRESH tx scan (the lazily-scanned XDR),
@@ -604,6 +621,7 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
           }
         }
       } catch (error) {
+        if (reviewPreparationRef.current !== preparation) return;
         if (shouldPresent) setIsOpeningReviewSheet(false);
         logger.error(
           "SwapAmountScreen",
@@ -675,24 +693,20 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
       return;
     }
 
-    // Every other branch either navigates to the picker or presents a
-    // bottom sheet. Wait for the keyboard's hide animation to finish
-    // before continuing so any sheet we present next opens at its final
-    // position rather than at the keyboard-occluded height first and
-    // then jumping down.
-    await waitForKeyboardDismiss();
+    if (ctaState.kind === "insufficient" || ctaState.kind === "loading") {
+      return;
+    }
+
+    // Prepare while the keyboard hides; present only after both finish.
+    const keyboardDismissed = waitForKeyboardDismiss();
 
     if (ctaState.kind === "select") {
+      await keyboardDismissed;
       if (ctaState.missingSide === "source") {
         openSourcePicker(SwapPickerEntrypoint.CTA);
       } else {
         openDestinationPicker(SwapPickerEntrypoint.CTA);
       }
-      return;
-    }
-
-    if (ctaState.kind === "insufficient" || ctaState.kind === "loading") {
-      // disabled / no-op
       return;
     }
 
@@ -710,13 +724,14 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
       })
     ) {
       analytics.track(AnalyticsEvent.SWAP_XLM_RESERVE_INSUFFICIENT_SHOWN);
+      await keyboardDismissed;
       xlmReserveBottomSheetRef.current?.present();
       return;
     }
 
     // Build + scan, then present either the unable-to-scan gate or the review
     // sheet based on the fresh scan result (decided inside prepareSwapTransaction).
-    await prepareSwapTransaction(true);
+    await prepareSwapTransaction(true, keyboardDismissed);
   }, [
     ctaState,
     prepareSwapTransaction,
@@ -734,6 +749,7 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
   // next flow re-fetches fresh values).
   useEffect(
     () => () => {
+      reviewPreparationRef.current += 1;
       resetSwap();
       resetTransaction();
       resetToDefaults();

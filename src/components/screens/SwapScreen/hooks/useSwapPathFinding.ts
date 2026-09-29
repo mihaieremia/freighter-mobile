@@ -1,4 +1,4 @@
-import { DEFAULT_DEBOUNCE_DELAY, NETWORKS } from "config/constants";
+import { NETWORKS } from "config/constants";
 import { TokenTypeWithCustomToken, PricedBalance } from "config/types";
 import { SwapInputSide, useSwapStore } from "ducks/swap";
 import useDebounce from "hooks/useDebounce";
@@ -8,6 +8,8 @@ type BalanceItem = PricedBalance & {
   id: string;
   tokenType: TokenTypeWithCustomToken;
 };
+
+const SWAP_QUOTE_DEBOUNCE_MS = 200;
 
 /**
  * Debounced path-finder for the swap flow.
@@ -52,16 +54,17 @@ export const useSwapPathFinding = ({
   // The typed amount is what the quote is asked for; the other card shows what
   // the backend derives from it, so it must not re-trigger the lookup.
   const typedAmount = isExactOut ? destinationInputAmount : sourceAmount;
-
-  const debouncedFindSwapPath = useDebounce(() => {
-    if (
-      sourceBalance &&
+  const canFindPath = Boolean(
+    sourceBalance &&
       destinationTokenForPath &&
       typedAmount &&
       Number(typedAmount) > 0 &&
       !amountError &&
-      publicKey
-    ) {
+      publicKey,
+  );
+
+  const debouncedFindSwapPath = useDebounce(() => {
+    if (sourceBalance && destinationTokenForPath && canFindPath && publicKey) {
       findSwapPath({
         sourceBalance,
         destinationBalance: destinationTokenForPath,
@@ -73,17 +76,17 @@ export const useSwapPathFinding = ({
         network,
         publicKey,
       });
-    } else {
-      clearPath();
     }
-  }, DEFAULT_DEBOUNCE_DELAY);
+  }, SWAP_QUOTE_DEBOUNCE_MS);
 
   // Key on the stable `id` (not the object ref) so the 30s balance-polling
   // re-renders don't re-trigger path-finding. The quote stays frozen until
   // the token or amount actually changes. `debouncedFindSwapPath` is a stable
   // wrapper that reads the latest objects at call time.
   useEffect(() => {
-    debouncedFindSwapPath();
+    clearPath(canFindPath);
+    if (canFindPath) debouncedFindSwapPath();
+    else debouncedFindSwapPath.cancel();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     sourceBalance?.id,
@@ -91,9 +94,14 @@ export const useSwapPathFinding = ({
     typedAmount,
     isExactOut,
     swapSlippage,
+    swapTimeout,
     network,
     publicKey,
     amountError,
+    canFindPath,
+    clearPath,
     debouncedFindSwapPath,
   ]);
+
+  useEffect(() => () => clearPath(), [clearPath]);
 };

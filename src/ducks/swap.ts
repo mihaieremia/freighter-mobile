@@ -100,7 +100,8 @@ interface SwapState {
     /** Refresh the quote in place: no loading state, and a failed refresh keeps the current quote. */
     silent?: boolean;
   }) => Promise<void>;
-  clearPath: () => void;
+  /** Invalidate the quote; keep loading visible when its replacement is debouncing. */
+  clearPath: (isLoadingPath?: boolean) => void;
   resetSwap: () => void;
 }
 
@@ -123,9 +124,13 @@ const initialState = {
 const computeDestMinWithSlippage = (
   destinationAmount: string,
   slippage: number,
+  decimals = DEFAULT_DECIMALS,
 ): string => {
-  const mult = 1 - slippage / 100;
-  return new BigNumber(destinationAmount).times(new BigNumber(mult)).toFixed(7);
+  const slippagePpm = Math.trunc(slippage * 10_000);
+  return new BigNumber(destinationAmount)
+    .times(1_000_000 - slippagePpm)
+    .shiftedBy(-6)
+    .toFixed(decimals, BigNumber.ROUND_DOWN);
 };
 
 /**
@@ -138,12 +143,23 @@ const findClassicSwapPath = async (params: {
   sourceAmount: string;
   slippage: number;
   network: NETWORKS;
+  signal: AbortSignal;
 }): Promise<SwapPathData | null> => {
-  const { sourceBalance, destinationBalance, sourceAmount, slippage, network } =
-    params;
+  const {
+    sourceBalance,
+    destinationBalance,
+    sourceAmount,
+    slippage,
+    network,
+    signal,
+  } = params;
 
   const networkDetails = mapNetworkToNetworkDetails(network);
   const server = new Horizon.Server(networkDetails.networkUrl);
+  server.httpClient.interceptors.request.use((config) => ({
+    ...config,
+    signal,
+  }));
 
   const sourceToken = getTokenForPayment(sourceBalance);
   const destToken = getTokenForPayment(destinationBalance);
@@ -200,6 +216,7 @@ const findBackendSwapPath = async (params: {
   timeoutSeconds: number;
   network: NETWORKS;
   publicKey: string;
+  signal: AbortSignal;
 }): Promise<SwapPathData | null | undefined> => {
   let quote: SwapQuote;
   try {
@@ -214,22 +231,25 @@ const findBackendSwapPath = async (params: {
       sender: params.publicKey,
       slippagePercent: params.slippage,
       timeoutSeconds: params.timeoutSeconds,
+      signal: params.signal,
     });
   } catch (error) {
+    if (params.signal.aborted) return undefined;
+    if (isRequestCanceled(error)) throw error;
     if (isApiError(error) && error.status === 404) {
       return null;
     }
-    if (!isRequestCanceled(error)) {
-      logApiError(
-        "SwapStore",
-        "Swap quote unreachable",
-        "Swap quote request failed",
-        error,
-      );
-    }
+    logApiError(
+      "SwapStore",
+      "Swap quote unreachable",
+      "Swap quote request failed",
+      error,
+    );
 
     return undefined;
   }
+
+  if (params.signal.aborted) return undefined;
 
   // The amounts are shown, and the transaction is checked, with the decimals the
   // wallet knows the token has, so a quote that disagrees is not trusted.
@@ -246,6 +266,51 @@ const findBackendSwapPath = async (params: {
     return undefined;
   }
 
+  const [sourceAmount, destinationAmount, minimum] = [
+    quote.sourceAmount,
+    quote.destinationAmount,
+    quote.destinationAmountMin,
+  ].map(
+    (amount) =>
+      new BigNumber(
+        typeof amount === "string" &&
+        amount.length <= 40 &&
+        /^\d+(?:\.\d+)?$/.test(amount)
+          ? amount
+          : NaN,
+      ),
+  );
+  if (
+    !Object.values(SwapQuoteSource).includes(quote.source) ||
+    !sourceAmount.isFinite() ||
+    !sourceAmount.gt(0) ||
+    (sourceAmount.decimalPlaces() ?? Infinity) >
+      getBalanceDecimals(params.sourceBalance) ||
+    (params.sourceAmount !== undefined &&
+      !sourceAmount.eq(params.sourceAmount)) ||
+    !destinationAmount.isFinite() ||
+    !destinationAmount.gt(0) ||
+    (destinationAmount.decimalPlaces() ?? Infinity) > expectedDecimals ||
+    !minimum.isFinite() ||
+    minimum.lt(0) ||
+    (minimum.decimalPlaces() ?? Infinity) > expectedDecimals ||
+    minimum.gt(destinationAmount) ||
+    minimum.lt(
+      computeDestMinWithSlippage(
+        quote.destinationAmount,
+        params.slippage,
+        expectedDecimals,
+      ),
+    )
+  ) {
+    logger.error(
+      "SwapStore",
+      "Swap quote amounts do not match the request",
+      new Error("Invalid swap quote amounts or venue"),
+    );
+    return undefined;
+  }
+
   return {
     sourceAmount: quote.sourceAmount,
     destinationAmount: quote.destinationAmount,
@@ -259,31 +324,45 @@ const findBackendSwapPath = async (params: {
   };
 };
 
-export const useSwapStore = create<SwapState>((set) => ({
+let latestPathRequest = 0;
+let activePathController: AbortController | undefined;
+
+export const useSwapStore = create<SwapState>((set, get) => ({
   ...initialState,
 
-  setSourceToken: (tokenId, tokenSymbol) =>
-    set((state) =>
-      tokenId === state.sourceTokenId
-        ? { sourceTokenId: tokenId, sourceTokenSymbol: tokenSymbol }
-        : {
-            sourceTokenId: tokenId,
-            sourceTokenSymbol: tokenSymbol,
-            // Reset the amount on an actual source-token change. Centralized
-            // here so every caller is correct by construction: otherwise the
-            // prior amount (e.g. the old token's Max) is briefly validated
-            // against the new token's possibly-smaller balance before the
-            // converter's reset-on-token-change lands, flashing an
-            // "Insufficient balance" error. Skipped when the token is
-            // unchanged so a re-pick doesn't wipe an in-progress amount.
-            sourceAmount: "0",
-            sourceAmountDisplay: "0",
-          },
-    ),
+  setSourceToken: (tokenId, tokenSymbol) => {
+    const changed = tokenId !== get().sourceTokenId;
+    if (changed) get().clearPath();
+    set({
+      sourceTokenId: tokenId,
+      sourceTokenSymbol: tokenSymbol,
+      ...(changed && {
+        // Reset the amount on an actual source-token change. Centralized
+        // here so every caller is correct by construction: otherwise the
+        // prior amount (e.g. the old token's Max) is briefly validated
+        // against the new token's possibly-smaller balance before the
+        // converter's reset-on-token-change lands, flashing an
+        // "Insufficient balance" error. Skipped when the token is
+        // unchanged so a re-pick doesn't wipe an in-progress amount.
+        sourceAmount: "0",
+        sourceAmountDisplay: "0",
+      }),
+    });
+  },
 
-  setDestinationToken: (descriptor) => set({ destinationToken: descriptor }),
+  setDestinationToken: (descriptor) => {
+    const current = get().destinationToken;
+    if (
+      descriptor?.id !== current?.id ||
+      descriptor?.decimals !== current?.decimals
+    ) {
+      get().clearPath();
+    }
+    set({ destinationToken: descriptor });
+  },
 
   setSourceAmount: (amount, preserveDisplay = false) => {
+    if (amount !== get().sourceAmount) get().clearPath();
     // Expect internal dot notation input, convert to display format
     if (!preserveDisplay) {
       const displayAmount = formatBigNumberForDisplay(new BigNumber(amount), {
@@ -295,10 +374,16 @@ export const useSwapStore = create<SwapState>((set) => ({
     }
   },
 
-  setInputSide: (side) => set({ inputSide: side }),
+  setInputSide: (side) => {
+    if (side === get().inputSide) return;
+    set({ inputSide: side });
+    get().clearPath();
+  },
 
-  setDestinationInputAmount: (amount) =>
-    set({ destinationInputAmount: amount }),
+  setDestinationInputAmount: (amount) => {
+    if (amount !== get().destinationInputAmount) get().clearPath();
+    set({ destinationInputAmount: amount });
+  },
 
   setSourceAmountDisplay: (displayAmount) => {
     // Update only the display value, preserve internal value
@@ -306,6 +391,10 @@ export const useSwapStore = create<SwapState>((set) => ({
   },
 
   findSwapPath: async (params) => {
+    const requestId = ++latestPathRequest;
+    activePathController?.abort();
+    const controller = new AbortController();
+    activePathController = controller;
     const {
       sourceBalance,
       destinationBalance,
@@ -322,11 +411,13 @@ export const useSwapStore = create<SwapState>((set) => ({
     }
 
     const failPath = (message: string) => {
-      if (silent) return;
+      if (requestId !== latestPathRequest) return;
 
       set({
         isLoadingPath: false,
-        pathError: __DEV__ ? message : t("swapScreen.errors.pathFindFailed"),
+        ...(!silent && {
+          pathError: __DEV__ ? message : t("swapScreen.errors.pathFindFailed"),
+        }),
       });
     };
 
@@ -337,7 +428,11 @@ export const useSwapStore = create<SwapState>((set) => ({
         throw new Error(t("debug.debugMessages.swapPathFailure"));
       }
 
-      const backendPath = await findBackendSwapPath(params);
+      const backendPath = await findBackendSwapPath({
+        ...params,
+        signal: controller.signal,
+      });
+      if (requestId !== latestPathRequest || controller.signal.aborted) return;
       if (
         backendPath === undefined &&
         (isExactOut ||
@@ -358,16 +453,18 @@ export const useSwapStore = create<SwapState>((set) => ({
               sourceAmount: sourceAmount ?? "0",
               slippage,
               network,
+              signal: controller.signal,
             })
           : backendPath;
+      if (requestId !== latestPathRequest || controller.signal.aborted) return;
 
       if (!pathResult) {
-        if (!silent) {
-          set({
-            isLoadingPath: false,
+        set({
+          isLoadingPath: false,
+          ...(!silent && {
             pathError: t("swapScreen.errors.noPathFound"),
-          });
-        }
+          }),
+        });
         return;
       }
 
@@ -389,28 +486,43 @@ export const useSwapStore = create<SwapState>((set) => ({
         }),
       });
     } catch (error) {
-      if (!isRequestCanceled(error)) {
-        logger.error("SwapStore", "Failed to find swap path", error);
+      if (requestId !== latestPathRequest || controller.signal.aborted) return;
+      if (isRequestCanceled(error)) {
+        set({ isLoadingPath: false });
+        return;
       }
+      logger.error("SwapStore", "Failed to find swap path", error);
 
       failPath(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (activePathController === controller) activePathController = undefined;
     }
   },
 
-  clearPath: () =>
+  clearPath: (isLoadingPath = false) => {
+    latestPathRequest += 1;
+    activePathController?.abort();
+    activePathController = undefined;
     set((state) => ({
       pathResult: null,
       destinationAmount: "0",
       pathError: null,
+      isLoadingPath,
       // The amount to sell is derived from the typed amount to receive, so it
       // goes with the quote.
       ...(state.inputSide === SwapInputSide.DESTINATION && {
         sourceAmount: "0",
         sourceAmountDisplay: "0",
       }),
-    })),
+    }));
+  },
 
-  resetSwap: () => set(initialState),
+  resetSwap: () => {
+    latestPathRequest += 1;
+    activePathController?.abort();
+    activePathController = undefined;
+    set(initialState);
+  },
 }));
 
 /**

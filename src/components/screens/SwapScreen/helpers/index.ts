@@ -24,6 +24,7 @@ export {
 } from "./quoteErrors";
 export {
   buildAggregatorExpectation,
+  isAggregatorQuoteSource,
   isStaleAggregatorQuote,
 } from "./swapAggregator";
 export { addBoughtTokenToBalances } from "./swapInventory";

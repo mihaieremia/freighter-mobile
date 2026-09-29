@@ -1180,6 +1180,7 @@ export const submitTransaction = async (body: SubmitTransactionBody) => {
 export enum SwapQuoteSource {
   HORIZON = "horizon",
   XOXNO = "xoxno",
+  LIFI = "lifi",
 }
 
 /**
@@ -1211,9 +1212,11 @@ export interface SwapQuote {
  */
 export const fetchSwapQuote = async ({
   network,
+  signal,
   ...body
 }: {
   network: NETWORKS;
+  signal?: AbortSignal;
   sourceAsset: string;
   destAsset: string;
   sourceAmount?: string;
@@ -1228,7 +1231,7 @@ export const fetchSwapQuote = async ({
   const { data } = await freighterBackendV2.post<{ data: SwapQuote }>(
     "/swap/quote",
     body,
-    { params: { network } },
+    { params: { network }, signal },
   );
 
   return data.data;

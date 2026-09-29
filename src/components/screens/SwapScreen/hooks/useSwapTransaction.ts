@@ -8,6 +8,7 @@ import {
   getTokenFromBalance,
   isAggregatorSlippageRejection,
   isStaleAggregatorQuote,
+  isAggregatorQuoteSource,
   reportSettledSwap,
   resolveDestinationDisplayPrice,
   withDescriptorPrice,
@@ -57,7 +58,6 @@ import { useToast } from "providers/ToastProvider";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { analytics } from "services/analytics";
 import { FailureVolume } from "services/analytics/types";
-import { SwapQuoteSource } from "services/backend";
 import { SecurityLevel } from "services/blockaid/constants";
 import { assessTransactionSecurity } from "services/blockaid/helper";
 
@@ -93,6 +93,8 @@ interface UseSwapTransactionResult {
    */
   setupSwapTransaction: () => Promise<{
     scanResult: Blockaid.StellarTransactionScanResponse | undefined;
+    quote: SwapPathResult;
+    transactionXDR: string;
   } | void>;
   handleProcessingScreenClose: () => void;
   sourceToken: NativeToken | NonNativeToken;
@@ -210,6 +212,13 @@ export const useSwapTransaction = ({
   const { scanTransaction } = useBlockaidTransaction();
   const { t } = useAppTranslation();
   const { showToast } = useToast();
+  const swapAttemptRef = useRef(0);
+  useEffect(
+    () => () => {
+      swapAttemptRef.current += 1;
+    },
+    [],
+  );
 
   // Latest source/destination balances, read at call time by the quote-expired
   // refetch. Keeps executeSwap's deps on the stable `?.tokenCode` (not the full
@@ -247,20 +256,31 @@ export const useSwapTransaction = ({
     // Get fresh settings values each time the function is called
     const { swapFee: freshSwapFee, swapTimeout: freshSwapTimeout } =
       useSwapSettingsStore.getState();
+    const selection = useSwapStore.getState();
+    const selectionIsCurrent = () => {
+      const current = useSwapStore.getState();
+      return (
+        current.sourceTokenId === selection.sourceTokenId &&
+        current.sourceAmount === selection.sourceAmount &&
+        current.destinationToken?.id === selection.destinationToken?.id
+      );
+    };
 
     // An aggregator transaction expires and its simulation ages, so a quote
     // that sat on the amount screen is refreshed before it is verified.
     let quote = pathResult;
     if (isStaleAggregatorQuote(quote)) {
-      quote =
-        (await requote({
-          sourceBalance,
-          destinationBalance: destinationTokenInput,
-          sourceAmount,
-          network,
-          publicKey: account.publicKey,
-        })) ?? quote;
+      const refreshed = await requote({
+        sourceBalance,
+        destinationBalance: destinationTokenInput,
+        sourceAmount,
+        network,
+        publicKey: account.publicKey,
+      });
+      if (!refreshed || !selectionIsCurrent()) return undefined;
+      quote = refreshed;
     }
+    if (!new BigNumber(quote.sourceAmount).eq(sourceAmount)) return undefined;
 
     // Derive includeTrustline from the swap store's destinationToken.
     // When requiresTrustline === true the user doesn't yet hold a trustline for the
@@ -283,7 +303,7 @@ export const useSwapTransaction = ({
     }
 
     let transactionXDR: string | null;
-    if (quote.source === SwapQuoteSource.XOXNO) {
+    if (isAggregatorQuoteSource(quote.source)) {
       // A Soroban swap is a single operation, so a missing trustline is opened
       // by a transaction of its own first; the swap is prepared after it lands.
       transactionXDR =
@@ -334,9 +354,11 @@ export const useSwapTransaction = ({
 
     // A failed scan is undefined, which classifies as unable-to-scan downstream.
     const scanResult = await scanSafely(transactionXDR);
+    if (!selectionIsCurrent() || useSwapStore.getState().pathResult !== quote)
+      return undefined;
     setTransactionScanResult(scanResult);
 
-    return { scanResult };
+    return { scanResult, quote, transactionXDR };
   }, [
     sourceBalance,
     destinationTokenInput,
@@ -365,6 +387,18 @@ export const useSwapTransaction = ({
       throw new Error("Destination token is required for swap transaction");
     }
 
+    swapAttemptRef.current += 1;
+    const attempt = swapAttemptRef.current;
+    let builderRequestId = useTransactionBuilderStore.getState().requestId;
+    const isCurrentAttempt = () => swapAttemptRef.current === attempt;
+    const isCurrentTransaction = () =>
+      isCurrentAttempt() &&
+      useTransactionBuilderStore.getState().requestId === builderRequestId;
+    const cancelStaleAttempt = () => {
+      if (isCurrentTransaction()) return false;
+      if (isCurrentAttempt()) setIsProcessing(false);
+      return true;
+    };
     setIsProcessing(true);
 
     // Declared outside the try so the catch can cancel a snapshot whose
@@ -380,11 +414,16 @@ export const useSwapTransaction = ({
     let sourceCanonicalId = "";
     let destCanonicalId = "";
 
-    // Signs the built transaction, or throws: the catch below is this flow's
-    // single failure path (swap.failed without volume, since nothing reached
-    // the network, and the error toast). The user already approved at the review
-    // sheet, so a signing failure is a fault, not a decision.
-    const signOrThrow = (secretKey: string): string => {
+    // A lock cancels quietly. A signing failure reaches this flow's single
+    // failure handler below, without attempted volume.
+    const signOrThrow = (secretKey: string): string | null => {
+      // Signing reads the global builder: a closed or replaced flow must not
+      // sign another transaction after its asynchronous scan finishes.
+      if (cancelStaleAttempt()) return null;
+      if (!isWalletUnlocked()) {
+        setIsProcessing(false);
+        return null;
+      }
       const signedXDR = signTransaction({ secretKey, network });
       if (!signedXDR) {
         const { error: signingError } = useTransactionBuilderStore.getState();
@@ -427,7 +466,7 @@ export const useSwapTransaction = ({
       // built transaction is the trustline. Send it, then swap.
       const quotedPath = useSwapStore.getState().pathResult;
       if (quotedPath?.requiresTrustlineFirst && account.publicKey) {
-        signOrThrow(account.privateKey);
+        if (!signOrThrow(account.privateKey)) return;
         // An intermediate step: its hash must not reach the store, or the
         // processing screen reports the swap as settled on the trustline.
         // `didSubmit` stays false, so a failure here carries no volume.
@@ -448,6 +487,7 @@ export const useSwapTransaction = ({
         // The trustline is on chain whatever becomes of the swap, so it is
         // reported now and not again when the swap settles.
         trackTrustlineAdded(destinationTokenInput.tokenCode);
+        if (cancelStaleAttempt()) return;
 
         // The trustline exists now, so the aggregator can simulate the swap.
         const swapPath = await requote({
@@ -457,16 +497,17 @@ export const useSwapTransaction = ({
           network,
           publicKey: account.publicKey,
         });
+        if (cancelStaleAttempt()) return;
         if (
           !swapPath ||
           swapPath === quotedPath ||
-          swapPath.source !== SwapQuoteSource.XOXNO ||
+          !isAggregatorQuoteSource(swapPath.source) ||
           !swapPath.aggregatorEnvelopeXdr
         ) {
           throw new Error(t("swapScreen.errors.trustlineAddedSwapUnavailable"));
         }
         if (
-          new BigNumber(swapPath.destinationAmount).isLessThan(
+          new BigNumber(swapPath.destinationAmountMin).isLessThan(
             quotedPath.destinationAmountMin,
           )
         ) {
@@ -483,6 +524,8 @@ export const useSwapTransaction = ({
             pathResult: swapPath,
           }),
         });
+        if (!isCurrentAttempt()) return;
+        builderRequestId = useTransactionBuilderStore.getState().requestId;
         if (!swapXdr) {
           const { error: verifyError } = useTransactionBuilderStore.getState();
           // prepareAggregatorSwap has logged the detail.
@@ -497,9 +540,10 @@ export const useSwapTransaction = ({
         // swap envelope gets its own scan before it is signed. Same scan call
         // as the review; a failed scan is unable-to-scan, which proceeds as it
         // does in the single-transaction flow.
-        const swapSecurityLevel = assessTransactionSecurity(
-          await scanSafely(swapXdr),
-        ).level;
+        const swapScanResult = await scanSafely(swapXdr);
+        if (cancelStaleAttempt()) return;
+        const swapSecurityLevel =
+          assessTransactionSecurity(swapScanResult).level;
         const blockedKey = BLOCKED_SWAP_ERROR_KEYS[swapSecurityLevel];
         if (blockedKey) {
           logger.warn(
@@ -511,6 +555,7 @@ export const useSwapTransaction = ({
       }
 
       const signedXDR = signOrThrow(account.privateKey);
+      if (!signedXDR) return;
       // The quoted destination amount of the transaction just signed: a
       // trustline-first flow re-quoted in place, so the store holds its quote.
       const signedDestinationAmount =
@@ -667,7 +712,7 @@ export const useSwapTransaction = ({
       // A Soroban token bought in this swap has no trustline to add, so list it in
       // the user's balances once the swap has settled.
       await addBoughtTokenToBalances({
-        token: useSwapStore.getState().destinationToken,
+        token: destinationDescriptor,
         publicKey: account.publicKey,
         network,
       });
@@ -679,7 +724,7 @@ export const useSwapTransaction = ({
         trackTrustlineAdded(destinationTokenInput.tokenCode);
       }
     } catch (error) {
-      setIsProcessing(false);
+      if (isCurrentAttempt()) setIsProcessing(false);
       // transactionBuilder.submitTransaction logs submit failures at
       // the appropriate severity (4xx-with-result_codes → warn
       // breadcrumb, everything else → logger.error). Re-logging here
@@ -754,6 +799,8 @@ export const useSwapTransaction = ({
           volume,
         });
 
+        if (!isCurrentTransaction()) return;
+
         showToast({
           variant: "error",
           title: t("swapScreen.errors.quoteExpired"),
@@ -794,6 +841,8 @@ export const useSwapTransaction = ({
         volume,
       });
 
+      if (!isCurrentTransaction()) return;
+
       // Show error toast that persists even if component unmounts
       const errorMessage =
         error instanceof Error
@@ -828,6 +877,7 @@ export const useSwapTransaction = ({
   ]);
 
   const handleProcessingScreenClose = () => {
+    swapAttemptRef.current += 1;
     setIsProcessing(false);
 
     if (account?.publicKey) {

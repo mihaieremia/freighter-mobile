@@ -1,11 +1,13 @@
 import { Horizon, scValToBigInt } from "@stellar/stellar-sdk";
 import BigNumber from "bignumber.js";
 import { AssetDiffSummary } from "components/screens/HistoryScreen/types";
-import { NetworkDetails } from "config/constants";
+import { NETWORKS, NetworkDetails } from "config/constants";
+import { LIFI_SWAP_ROUTER } from "config/lifiSwap";
 import { TokenTypeWithCustomToken } from "config/types";
 import { XOXNO_SWAP_ROUTER } from "config/xoxnoSwap";
 import { useTokenCatalogStore } from "ducks/tokenCatalog";
 import { ROUTER_SWAP_FUNCTION, readRouteTokens } from "helpers/aggregatorSwap";
+import { readLifiSwap } from "helpers/lifiSwap";
 import { addressToString, getInvokedContract } from "helpers/soroban";
 import { getCatalogContractId, getCatalogIconUrl } from "helpers/tokenCatalog";
 import { getReceivedTokenAmountFromMeta } from "helpers/transactionResult";
@@ -81,6 +83,13 @@ const readRouterSwapCall = (
 ): RouterSwapCall | null => {
   const router = XOXNO_SWAP_ROUTER[networkDetails.network];
   const invoked = getInvokedContract(operation, networkDetails);
+  if (
+    networkDetails.network === NETWORKS.PUBLIC &&
+    invoked?.contractId === LIFI_SWAP_ROUTER &&
+    invoked.fnName === "swap"
+  ) {
+    return readLifiSwap(invoked.args);
+  }
   if (
     !router ||
     invoked?.contractId !== router ||

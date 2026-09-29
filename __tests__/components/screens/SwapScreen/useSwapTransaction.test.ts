@@ -9,6 +9,7 @@ import { TokenTypeWithCustomToken } from "config/types";
 import type { ActiveAccount } from "ducks/auth";
 import { SwapPathResult, useSwapStore } from "ducks/swap";
 import { useTokenCatalogStore } from "ducks/tokenCatalog";
+import { isWalletUnlocked } from "hooks/useGetActiveAccount";
 import { analytics } from "services/analytics";
 import { SwapQuoteSource } from "services/backend";
 import { fetchTransactionMeta } from "services/stellarExpert";
@@ -49,6 +50,7 @@ const mockTrackSwapSuccess = jest.fn();
 const mockTrack = jest.fn();
 const mockScanTransaction = jest.fn().mockResolvedValue({});
 const mockGetBuilderState = jest.fn();
+let mockSwapSlippage = 0.5;
 
 jest.mock("ducks/transactionBuilder", () => ({
   useTransactionBuilderStore: Object.assign(
@@ -121,7 +123,7 @@ jest.mock("ducks/swapSettings", () => ({
     getState: () => ({
       swapFee: "100",
       swapTimeout: "30",
-      swapSlippage: "0.5",
+      swapSlippage: mockSwapSlippage,
     }),
   }),
 }));
@@ -171,6 +173,7 @@ const baseParams: Parameters<typeof useSwapTransaction>[0] = {
   sourceBalance: { tokenCode: "XLM" } as never,
   destinationTokenInput: { tokenCode: "USDC" } as never,
   pathResult: {
+    sourceAmount: "1",
     path: [],
     destinationAmount: "2.5",
     destinationAmountMin: "2.4",
@@ -227,6 +230,7 @@ const rejected = (op?: string, tx = "tx_failed") =>
 describe("useSwapTransaction", () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockSwapSlippage = 0.5;
     mockGetBuilderState.mockReturnValue({ error: "Submit error from store" });
     mockPricesByNetwork = {};
     mockFetchTransactionMeta.mockReset().mockResolvedValue(null);
@@ -403,6 +407,39 @@ describe("useSwapTransaction", () => {
         }),
       );
       expect(mockTrackTransactionError).not.toHaveBeenCalled();
+    });
+
+    it("allows a new execution after Close without a late failure changing its UI", async () => {
+      let finishFirst!: (outcome: ReturnType<typeof submitFailed>) => void;
+      mockSignTransaction.mockReturnValue("signed-xdr");
+      mockSubmitTransaction
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finishFirst = resolve;
+            }),
+        )
+        .mockResolvedValueOnce(submitOk());
+      const { result } = renderHook(() => useSwapTransaction(baseParams));
+      let first!: Promise<void>;
+      act(() => {
+        first = result.current.executeSwap();
+      });
+      expect(result.current.isProcessing).toBe(true);
+      act(() => result.current.handleProcessingScreenClose());
+      expect(result.current.isProcessing).toBe(false);
+      await act(async () => {
+        await result.current.executeSwap();
+        finishFirst(submitFailed());
+        await first;
+      });
+
+      expect(mockSignTransaction).toHaveBeenCalledTimes(2);
+      expect(mockSubmitTransaction).toHaveBeenCalledTimes(2);
+      expect(result.current.isProcessing).toBe(true);
+      expect(mockShowToast).not.toHaveBeenCalled();
+      // The old network outcome still belongs in telemetry after Close.
+      expect(mockTrackTransactionError).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -882,7 +919,11 @@ describe("useSwapTransaction", () => {
           tokenType: TokenTypeWithCustomToken.CREDIT_ALPHANUM4,
           requiresTrustline: needsTrustline,
         });
-        useSwapStore.setState({ pathResult: path });
+        useSwapStore.setState({
+          sourceTokenId: "native",
+          sourceAmount: path.sourceAmount,
+          pathResult: path,
+        });
       });
 
     const run = async (
@@ -897,6 +938,7 @@ describe("useSwapTransaction", () => {
     };
 
     beforeEach(() => {
+      mockSwapSlippage = 1; // Aggregator fixtures use a 1% minimum.
       mockFetchSwapQuote.mockReset();
       mockSignTransaction.mockReturnValue("signed-xdr");
       mockSubmitTransaction.mockResolvedValue(submitOk());
@@ -904,26 +946,30 @@ describe("useSwapTransaction", () => {
     });
 
     describe("setupSwapTransaction", () => {
-      it("verifies a fresh aggregator quote against what the user asked for without refreshing it", async () => {
-        const path = quote();
-        seed(path);
+      it.each([SwapQuoteSource.XOXNO, SwapQuoteSource.LIFI])(
+        "verifies a fresh %s quote without refreshing it",
+        async (source) => {
+          const path = quote({ source });
+          seed(path);
 
-        await run(path, "setupSwapTransaction");
+          await run(path, "setupSwapTransaction");
 
-        expect(mockFetchSwapQuote).not.toHaveBeenCalled();
-        expect(mockBuildSwapTransaction).not.toHaveBeenCalled();
-        expect(mockPrepareAggregatorSwap).toHaveBeenCalledWith({
-          envelopeXdr: "envelope-1",
-          expectation: {
-            network: NETWORKS.PUBLIC,
-            sender: SENDER,
-            sourceToken: XLM_SAC,
-            destinationToken: USDC_SAC,
-            sourceAmount: 100000000n,
-            minDestinationAmount: 22719551n,
-          },
-        });
-      });
+          expect(mockFetchSwapQuote).not.toHaveBeenCalled();
+          expect(mockBuildSwapTransaction).not.toHaveBeenCalled();
+          expect(mockPrepareAggregatorSwap).toHaveBeenCalledWith({
+            envelopeXdr: "envelope-1",
+            expectation: {
+              source,
+              network: NETWORKS.PUBLIC,
+              sender: SENDER,
+              sourceToken: XLM_SAC,
+              destinationToken: USDC_SAC,
+              sourceAmount: 100000000n,
+              minDestinationAmount: 22719551n,
+            },
+          });
+        },
+      );
 
       it("scans the verified aggregator envelope the review will show", async () => {
         mockPrepareAggregatorSwap.mockReturnValue("verified-swap-xdr");
@@ -969,6 +1015,68 @@ describe("useSwapTransaction", () => {
           expect.objectContaining({ envelopeXdr: BACKEND_ENVELOPE }),
         );
       });
+
+      it("does not prepare an old quote when an input edit cancels its refresh", async () => {
+        let resolveQuote!: (value: ReturnType<typeof backendQuote>) => void;
+        mockFetchSwapQuote.mockReturnValueOnce(
+          new Promise<ReturnType<typeof backendQuote>>((resolve) => {
+            resolveQuote = resolve;
+          }),
+        );
+        const stale = quote({ quotedAt: Date.now() - 60_000 });
+        seed(stale);
+        const { result } = renderHook(() =>
+          useSwapTransaction(paramsFor(stale)),
+        );
+        let pending!: ReturnType<typeof result.current.setupSwapTransaction>;
+        act(() => {
+          pending = result.current.setupSwapTransaction();
+          useSwapStore.getState().setSourceAmount("20");
+          resolveQuote(backendQuote());
+        });
+        await act(async () => {
+          await pending.catch(() => undefined);
+        });
+
+        expect(useSwapStore.getState().pathResult).toBeNull();
+        expect(mockPrepareAggregatorSwap).not.toHaveBeenCalled();
+        expect(mockScanTransaction).not.toHaveBeenCalled();
+      });
+
+      it.each(["input edit", "new quote"])(
+        "does not return a review when %s replaces the quote during scanning",
+        async (change) => {
+          let resolveScan!: (value: unknown) => void;
+          mockScanTransaction.mockReturnValueOnce(
+            new Promise((resolve) => {
+              resolveScan = resolve;
+            }),
+          );
+          const path = quote();
+          seed(path);
+          const { result } = renderHook(() =>
+            useSwapTransaction(paramsFor(path)),
+          );
+          let pending!: ReturnType<typeof result.current.setupSwapTransaction>;
+          act(() => {
+            pending = result.current.setupSwapTransaction();
+            if (change === "input edit") {
+              useSwapStore.getState().setSourceAmount("20");
+            } else {
+              useSwapStore.setState({
+                pathResult: quote({ aggregatorEnvelopeXdr: BACKEND_ENVELOPE }),
+              });
+            }
+            resolveScan({});
+          });
+          await act(async () => {
+            expect(await pending).toBeUndefined();
+          });
+
+          expect(result.current.transactionScanResult).toBeUndefined();
+          expect(mockSignTransaction).not.toHaveBeenCalled();
+        },
+      );
 
       it("verifies the quote it holds when the refresh of a stale one finds no route", async () => {
         mockFetchSwapQuote.mockRejectedValueOnce({
@@ -1030,6 +1138,24 @@ describe("useSwapTransaction", () => {
         expect(mockTrackSwapSuccess).toHaveBeenCalled();
         expect(mockAddBoughtTokenToBalances).toHaveBeenCalledWith({
           token: expect.objectContaining({ tokenCode: "USDC" }),
+          publicKey: SENDER,
+          network: NETWORKS.PUBLIC,
+        });
+      });
+
+      it("keeps the bought token identity when Close resets the swap during submission", async () => {
+        const path = quote();
+        seed(path);
+        const { destinationToken } = useSwapStore.getState();
+        mockSubmitTransaction.mockImplementationOnce(() => {
+          useSwapStore.getState().resetSwap();
+          return Promise.resolve(submitOk());
+        });
+
+        await run(path, "executeSwap");
+
+        expect(mockAddBoughtTokenToBalances).toHaveBeenCalledWith({
+          token: destinationToken,
           publicKey: SENDER,
           network: NETWORKS.PUBLIC,
         });
@@ -1281,6 +1407,7 @@ describe("useSwapTransaction", () => {
             useSwapStore
               .getState()
               .setDestinationToken(xaumDescriptor(descriptorPriceUsd));
+            useSwapStore.setState({ pathResult: path });
           });
           const { result } = renderHook(() =>
             useSwapTransaction({
@@ -1502,6 +1629,139 @@ describe("useSwapTransaction", () => {
           expect(mockShowToast).not.toHaveBeenCalled();
         });
 
+        it.each(["Close", "unmount", "builder replacement"])(
+          "does not sign a newer builder XDR after %s during the swap scan",
+          async (cancellation) => {
+            let currentBuilderXdr = "trustline-xdr";
+            const signedBuilderXdr: string[] = [];
+            let resumeScan!: (value: unknown) => void;
+            let scanStarted!: () => void;
+            const started = new Promise<void>((resolve) => {
+              scanStarted = resolve;
+            });
+            mockGetBuilderState.mockReturnValue({ requestId: "trustline" });
+            mockPrepareAggregatorSwap.mockImplementationOnce(
+              ({ envelopeXdr }: { envelopeXdr: string }) => {
+                currentBuilderXdr = envelopeXdr;
+                mockGetBuilderState.mockReturnValue({ requestId: "swap" });
+                return envelopeXdr;
+              },
+            );
+            // Mirrors the real builder: signing reads its current global XDR.
+            mockSignTransaction.mockImplementation(() => {
+              signedBuilderXdr.push(currentBuilderXdr);
+              return `mock-signed:${currentBuilderXdr}`;
+            });
+            mockScanTransaction.mockImplementationOnce(() => {
+              scanStarted();
+              return new Promise((resolve) => {
+                resumeScan = resolve;
+              });
+            });
+            mockFetchSwapQuote.mockResolvedValue(backendQuote());
+            const path = trustlineQuote();
+            seed(path, true);
+            const { result, unmount } = renderHook(() =>
+              useSwapTransaction(paramsFor(path)),
+            );
+            let pending!: Promise<void>;
+            await act(async () => {
+              pending = result.current.executeSwap();
+              await started;
+            });
+            act(() => {
+              if (cancellation === "Close") {
+                result.current.handleProcessingScreenClose();
+              } else if (cancellation === "unmount") {
+                unmount();
+              } else {
+                mockGetBuilderState.mockReturnValue({ requestId: "new-flow" });
+              }
+              currentBuilderXdr = "new-user-flow-xdr";
+            });
+            await act(async () => {
+              resumeScan({});
+              await pending;
+            });
+
+            expect(signedBuilderXdr).toEqual(["trustline-xdr"]);
+            expect(mockSubmitTransaction).toHaveBeenCalledTimes(1);
+            expect(mockShowToast).not.toHaveBeenCalled();
+            if (cancellation !== "unmount") {
+              expect(result.current.isProcessing).toBe(false);
+            }
+          },
+        );
+
+        it.each(["trustline submit", "quote refresh"])(
+          "does not prepare another transaction after Close during %s",
+          async (step) => {
+            let resume!: () => void;
+            let stepStarted!: () => void;
+            const started = new Promise<void>((resolve) => {
+              stepStarted = resolve;
+            });
+            const pause = <T>(value: T) =>
+              new Promise<T>((resolve) => {
+                resume = () => resolve(value);
+                stepStarted();
+              });
+            mockFetchSwapQuote.mockResolvedValue(backendQuote());
+            if (step === "trustline submit") {
+              mockSubmitTransaction.mockImplementationOnce(() =>
+                pause(submitOk()),
+              );
+            } else {
+              mockFetchSwapQuote.mockImplementationOnce(() =>
+                pause(backendQuote()),
+              );
+            }
+            const path = trustlineQuote();
+            seed(path, true);
+            const { result } = renderHook(() =>
+              useSwapTransaction(paramsFor(path)),
+            );
+            let pending!: Promise<void>;
+            await act(async () => {
+              pending = result.current.executeSwap();
+              await started;
+            });
+            act(() => result.current.handleProcessingScreenClose());
+            await act(async () => {
+              resume();
+              await pending;
+            });
+
+            expect(mockSignTransaction).toHaveBeenCalledTimes(1);
+            expect(mockSubmitTransaction).toHaveBeenCalledTimes(1);
+            expect(mockPrepareAggregatorSwap).not.toHaveBeenCalled();
+            expect(mockScanTransaction).not.toHaveBeenCalled();
+            expect(mockShowToast).not.toHaveBeenCalled();
+          },
+        );
+
+        it("does not sign the swap if the wallet locks while the trustline is submitted", async () => {
+          const unlocked = isWalletUnlocked as jest.MockedFunction<
+            typeof isWalletUnlocked
+          >;
+          mockFetchSwapQuote.mockResolvedValue(backendQuote());
+          mockSubmitTransaction.mockImplementationOnce(() => {
+            unlocked.mockReturnValue(false);
+            return Promise.resolve(submitOk());
+          });
+
+          try {
+            await executeWithTrustline();
+
+            expect(mockSignTransaction).toHaveBeenCalledTimes(1);
+            expect(mockSubmitTransaction).toHaveBeenCalledTimes(1);
+            expect(mockTrackTransactionError).not.toHaveBeenCalled();
+            expect(mockShowToast).not.toHaveBeenCalled();
+          } finally {
+            unlocked.mockReturnValue(true);
+          }
+        });
+
         it("keeps the trustline hash out of the store and the swap's own hash in", async () => {
           mockFetchSwapQuote.mockResolvedValue(backendQuote());
 
@@ -1651,6 +1911,25 @@ describe("useSwapTransaction", () => {
           expect(mockSubmitTransaction).toHaveBeenCalledTimes(1);
           expect(mockPrepareAggregatorSwap).not.toHaveBeenCalled();
           expect(trustlineAddedCalls()).toHaveLength(1);
+          expect(mockShowToast).toHaveBeenCalledWith(
+            expect.objectContaining({
+              title: "swapScreen.errors.trustlineAddedPriceMoved",
+            }),
+          );
+        });
+
+        it("keeps the reviewed minimum when a refreshed quote offers less protection", async () => {
+          mockFetchSwapQuote.mockResolvedValue(
+            backendQuote({
+              destinationAmount: "2.28",
+              destinationAmountMin: "2.2572",
+            }),
+          );
+
+          await executeWithTrustline();
+
+          expect(mockSubmitTransaction).toHaveBeenCalledTimes(1);
+          expect(mockPrepareAggregatorSwap).not.toHaveBeenCalled();
           expect(mockShowToast).toHaveBeenCalledWith(
             expect.objectContaining({
               title: "swapScreen.errors.trustlineAddedPriceMoved",

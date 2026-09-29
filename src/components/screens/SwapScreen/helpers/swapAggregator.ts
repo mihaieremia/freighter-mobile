@@ -40,6 +40,7 @@ export const buildAggregatorExpectation = ({
 
   return {
     network,
+    source: pathResult.source,
     sender,
     sourceToken: swapContractId(sourceBalance, networkPassphrase),
     destinationToken: swapContractId(destinationBalance, networkPassphrase),
@@ -51,8 +52,12 @@ export const buildAggregatorExpectation = ({
   };
 };
 
+/** Sources whose executable quote is an unsigned Soroban envelope. */
+export const isAggregatorQuoteSource = (source: SwapQuoteSource): boolean =>
+  source === SwapQuoteSource.XOXNO || source === SwapQuoteSource.LIFI;
+
 /** Aggregator quotes go stale; classic ones are built at review time and do not. */
 export const isStaleAggregatorQuote = (pathResult: SwapPathResult): boolean =>
-  pathResult.source === SwapQuoteSource.XOXNO &&
+  isAggregatorQuoteSource(pathResult.source) &&
   !pathResult.requiresTrustlineFirst &&
   Date.now() - pathResult.quotedAt > AGGREGATOR_QUOTE_MAX_AGE_MS;

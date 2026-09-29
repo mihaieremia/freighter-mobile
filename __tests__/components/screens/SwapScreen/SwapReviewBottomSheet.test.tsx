@@ -3,6 +3,7 @@ import { userEvent } from "@testing-library/react-native";
 import { TokenIcon } from "components/TokenIcon";
 import SwapReviewBottomSheet from "components/screens/SwapScreen/components/SwapReviewBottomSheet";
 import { useSwapStore } from "ducks/swap";
+import { useTransactionBuilderStore } from "ducks/transactionBuilder";
 import { renderWithProviders } from "helpers/testUtils";
 import React from "react";
 import { SecurityLevel } from "services/blockaid/constants";
@@ -144,6 +145,11 @@ describe("SwapReviewBottomSheet", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    (useTransactionBuilderStore as unknown as jest.Mock).mockReturnValue({
+      transactionXDR: "mock-xdr",
+      isBuilding: false,
+      isSoroban: false,
+    });
   });
 
   describe("Basic layout", () => {
@@ -399,14 +405,20 @@ describe("SwapReviewBottomSheet", () => {
   });
 
   describe("fee row", () => {
-    it("shows the full fee of an aggregator transaction", () => {
+    it("shows the verified envelope fee even when the quote understates it", () => {
       (useSwapStore as unknown as jest.Mock).mockReturnValue({
         ...baseSwapState,
         pathResult: {
           ...baseSwapState.pathResult,
           source: "xoxno",
-          networkFeeXlm: "0.0098024",
+          networkFeeXlm: "0.00001",
         },
+      });
+      (useTransactionBuilderStore as unknown as jest.Mock).mockReturnValue({
+        transactionXDR: "mock-xdr",
+        isSoroban: true,
+        sorobanResourceFeeXlm: "0.0097924",
+        sorobanInclusionFeeXlm: "0.00001",
       });
 
       const { getByText } = renderWithProviders(

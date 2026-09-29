@@ -2,6 +2,7 @@
 import { act } from "@testing-library/react-native";
 import { NETWORKS } from "config/constants";
 import { logger } from "config/logger";
+import { TokenTypeWithCustomToken } from "config/types";
 import { SwapInputSide, useSwapStore } from "ducks/swap";
 import { SwapQuoteSource, fetchSwapQuote } from "services/backend";
 
@@ -17,12 +18,16 @@ import {
 } from "../../__mocks__/swapFixtures";
 
 const mockStrictSendPaths = jest.fn();
+const mockHorizonRequestUse = jest.fn();
 
 jest.mock("@stellar/stellar-sdk", () => ({
   ...jest.requireActual("@stellar/stellar-sdk"),
   Horizon: {
     Server: jest.fn().mockImplementation(() => ({
       strictSendPaths: mockStrictSendPaths,
+      httpClient: {
+        interceptors: { request: { use: mockHorizonRequestUse } },
+      },
     })),
   },
 }));
@@ -90,6 +95,257 @@ describe("useSwapStore.findSwapPath — backend quote", () => {
 
   afterEach(() => {
     Reflect.set(globalThis, DEV_FLAG, isDev);
+  });
+
+  describe("quote request ordering", () => {
+    const deferredQuote = () => {
+      let resolve!: (quote: ReturnType<typeof backendQuote>) => void;
+      let reject!: (error: unknown) => void;
+      const promise = new Promise<ReturnType<typeof backendQuote>>(
+        (yes, no) => {
+          resolve = yes;
+          reject = no;
+        },
+      );
+      return { promise, resolve, reject };
+    };
+
+    it("keeps the latest exact-output quote when an older request finishes last", async () => {
+      const older = deferredQuote();
+      mockFetchSwapQuote.mockReturnValueOnce(older.promise);
+      const pending = useSwapStore.getState().findSwapPath(exactOut);
+      const olderSignal = mockFetchSwapQuote.mock.calls[0][0]
+        .signal as AbortSignal;
+      mockFetchSwapQuote.mockResolvedValueOnce(
+        backendQuote({
+          sourceAmount: "20",
+          destinationAmount: "5",
+          destinationAmountMin: "4.95",
+        }),
+      );
+      await useSwapStore.getState().findSwapPath({
+        ...exactOut,
+        destinationAmount: "5",
+      });
+      expect(olderSignal.aborted).toBe(true);
+      older.resolve(backendQuote({ destinationAmount: "2.3" }));
+      await pending;
+
+      expect(useSwapStore.getState()).toMatchObject({
+        sourceAmount: "20",
+        destinationAmount: "5",
+        pathResult: { sourceAmount: "20", destinationAmount: "5" },
+      });
+    });
+
+    it.each([
+      [
+        "source token",
+        () => useSwapStore.getState().setSourceToken("native", "XLM"),
+      ],
+      [
+        "destination token",
+        () =>
+          useSwapStore.getState().setDestinationToken({
+            id: `USDC:${ISSUER}`,
+            tokenCode: "USDC",
+            issuer: ISSUER,
+            decimals: 7,
+            tokenType: TokenTypeWithCustomToken.CREDIT_ALPHANUM4,
+            requiresTrustline: false,
+          }),
+      ],
+      ["source amount", () => useSwapStore.getState().setSourceAmount("20")],
+      [
+        "receive amount",
+        () => useSwapStore.getState().setDestinationInputAmount("5"),
+      ],
+      [
+        "input side",
+        () => useSwapStore.getState().setInputSide(SwapInputSide.SOURCE),
+      ],
+      ["clear", () => useSwapStore.getState().clearPath()],
+      ["reset", () => useSwapStore.getState().resetSwap()],
+    ])(
+      "discards an in-flight quote after %s changes",
+      async (_name, change) => {
+        useSwapStore.setState({
+          inputSide: SwapInputSide.DESTINATION,
+          sourceAmount: "10",
+          destinationInputAmount: "2.3",
+        });
+        const older = deferredQuote();
+        mockFetchSwapQuote.mockReturnValueOnce(older.promise);
+        const pending = useSwapStore.getState().findSwapPath(exactOut);
+        const signal = mockFetchSwapQuote.mock.calls[0][0]
+          .signal as AbortSignal;
+        expect(signal.aborted).toBe(false);
+        change();
+        expect(signal.aborted).toBe(true);
+        const changed = useSwapStore.getState();
+        expect(changed.isLoadingPath).toBe(false);
+        older.resolve(aggregatorQuote);
+        await pending;
+
+        expect(useSwapStore.getState()).toMatchObject({
+          sourceAmount: changed.sourceAmount,
+          destinationAmount: "0",
+          pathResult: null,
+          pathError: null,
+        });
+      },
+    );
+
+    it("ignores a stale silent failure while the newer quote is loading", async () => {
+      const older = deferredQuote();
+      const newer = deferredQuote();
+      mockFetchSwapQuote.mockReturnValueOnce(older.promise);
+      const pendingOlder = useSwapStore
+        .getState()
+        .findSwapPath({ ...exactOut, silent: true });
+      mockFetchSwapQuote.mockReturnValueOnce(newer.promise);
+      const pendingNewer = useSwapStore.getState().findSwapPath(exactOut);
+      older.reject(noRoute);
+      await pendingOlder;
+      expect(useSwapStore.getState().isLoadingPath).toBe(true);
+      expect(useSwapStore.getState().pathError).toBeNull();
+      newer.resolve(aggregatorQuote);
+      await pendingNewer;
+    });
+
+    it("ends loading when a newer silent refresh fails before an older normal request", async () => {
+      const older = deferredQuote();
+      mockFetchSwapQuote.mockReturnValueOnce(older.promise);
+      const pending = useSwapStore.getState().findSwapPath(exactOut);
+      mockFetchSwapQuote.mockRejectedValueOnce(noRoute);
+      await useSwapStore.getState().findSwapPath({ ...exactOut, silent: true });
+      older.resolve(aggregatorQuote);
+      await pending;
+      expect(useSwapStore.getState().isLoadingPath).toBe(false);
+      expect(useSwapStore.getState().pathResult).toBeNull();
+    });
+
+    it("does not fall back or log when an aborted backend request rejects", async () => {
+      const older = deferredQuote();
+      const newer = deferredQuote();
+      mockFetchSwapQuote.mockReturnValueOnce(older.promise);
+      const pendingOlder = useSwapStore.getState().findSwapPath(params);
+      mockFetchSwapQuote.mockReturnValueOnce(newer.promise);
+      const pendingNewer = useSwapStore.getState().findSwapPath(params);
+      const newerSignal = mockFetchSwapQuote.mock.calls[1][0]
+        .signal as AbortSignal;
+      older.reject(badGateway);
+      await pendingOlder;
+      expect(mockStrictSendPaths).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(useSwapStore.getState().isLoadingPath).toBe(true);
+      // The older finally must not release the newer controller.
+      useSwapStore.getState().clearPath(true);
+      expect(newerSignal.aborted).toBe(true);
+      newer.resolve(aggregatorQuote);
+      await pendingNewer;
+      expect(useSwapStore.getState().isLoadingPath).toBe(true);
+      expect(useSwapStore.getState().pathResult).toBeNull();
+    });
+
+    it("aborts a Horizon fallback without publishing or logging its stale failure", async () => {
+      let rejectHorizon!: (error: Error) => void;
+      const horizon = new Promise<never>((_resolve, reject) => {
+        rejectHorizon = reject;
+      });
+      mockFetchSwapQuote.mockRejectedValueOnce(badGateway);
+      mockStrictSendPaths.mockReturnValueOnce({
+        limit: () => ({ call: () => horizon }),
+      });
+      const pending = useSwapStore.getState().findSwapPath(params);
+      // Wait for the backend failure to enter the fallback.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(mockHorizonRequestUse).toHaveBeenCalledTimes(1);
+      const interceptor = mockHorizonRequestUse.mock.calls[0][0] as (
+        config: object,
+      ) => { signal: AbortSignal };
+      const { signal } = interceptor({});
+      expect(signal).toBe(mockFetchSwapQuote.mock.calls[0][0].signal);
+      useSwapStore.getState().clearPath(true);
+      jest.clearAllMocks();
+      expect(signal.aborted).toBe(true);
+      rejectHorizon(new Error("aborted"));
+      await pending;
+      expect(logger.error).not.toHaveBeenCalled();
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(useSwapStore.getState()).toMatchObject({
+        isLoadingPath: true,
+        pathResult: null,
+        pathError: null,
+      });
+    });
+  });
+
+  it.each([
+    ["an unknown venue", { source: "unknown" }],
+    ["a negative input", { sourceAmount: "-1" }],
+    ["an exponent input", { sourceAmount: "1e1" }],
+    ["an exponent output", { destinationAmount: "2.2949042e0" }],
+    ["an unbounded output", { destinationAmount: "1e999999999" }],
+    ["a non-finite input", { sourceAmount: "Infinity" }],
+    [
+      "input precision the source token cannot represent",
+      { sourceAmount: "10.00000001" },
+    ],
+    ["a negative output", { destinationAmount: "-1" }],
+    ["a non-finite output", { destinationAmount: "NaN" }],
+    [
+      "output precision the destination token cannot represent",
+      { destinationAmount: "2.29490421" },
+    ],
+    ["a negative minimum", { destinationAmountMin: "-1" }],
+    ["a non-finite minimum", { destinationAmountMin: "Infinity" }],
+    [
+      "minimum precision the destination token cannot represent",
+      { destinationAmountMin: "2.27195511" },
+    ],
+    ["a minimum above the quoted output", { destinationAmountMin: "3" }],
+    [
+      "a minimum below the user's slippage bound",
+      { destinationAmountMin: "0.0000001" },
+    ],
+  ])("rejects %s in a backend quote", async (_name, override) => {
+    mockFetchSwapQuote.mockResolvedValueOnce(backendQuote(override));
+    await useSwapStore.getState().findSwapPath(exactOut);
+    expect(useSwapStore.getState().pathResult).toBeNull();
+    expect(useSwapStore.getState().pathError).toBeTruthy();
+    expect(mockStrictSendPaths).not.toHaveBeenCalled();
+  });
+
+  it("rejects a backend quote that changes a fixed sell amount", async () => {
+    mockFetchSwapQuote.mockResolvedValueOnce(
+      backendQuote({ sourceAmount: "11" }),
+    );
+    await useSwapStore.getState().findSwapPath({
+      ...params,
+      sourceBalance: { ...dejtrsy, decimals: 7 },
+    });
+    expect(useSwapStore.getState().pathResult).toBeNull();
+    expect(useSwapStore.getState().pathError).toBeTruthy();
+  });
+
+  it("accepts a minimum floored in 18-decimal atoms without intermediate rounding", async () => {
+    mockFetchSwapQuote.mockResolvedValueOnce(
+      backendQuote({
+        destinationAmount: "0.000000000000000001",
+        destinationAmountMin: "0",
+        destinationDecimals: 18,
+      }),
+    );
+    await useSwapStore.getState().findSwapPath({
+      ...exactOut,
+      destinationAmount: "0.000000000000000001",
+      destinationBalance: dejtrsy,
+      slippage: 0.5,
+    });
+    expect(useSwapStore.getState().pathResult?.destinationAmountMin).toBe("0");
   });
 
   it("names both assets the way the backend expects and uses its route, minimum, fee and transaction", async () => {
@@ -185,6 +441,19 @@ describe("useSwapStore.findSwapPath — backend quote", () => {
     });
   });
 
+  it("ends a canceled classic quote without a fallback or visible error", async () => {
+    mockFetchSwapQuote.mockRejectedValueOnce({ message: "canceled" });
+    await useSwapStore.getState().findSwapPath(params);
+    expect(mockStrictSendPaths).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(useSwapStore.getState()).toMatchObject({
+      isLoadingPath: false,
+      pathResult: null,
+      pathError: null,
+    });
+  });
+
   it.each([
     [
       "a connectivity failure",
@@ -276,6 +545,7 @@ describe("useSwapStore.findSwapPath — backend quote", () => {
       ...aggregatorQuote,
       sourceAmount: "10.0489927",
       destinationAmount: "2.3027190",
+      destinationAmountMin: "2.2796918",
     };
 
     it("asks the backend for the wanted output and takes the sized input", async () => {

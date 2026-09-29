@@ -6,8 +6,11 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import { NETWORKS, mapNetworkToNetworkDetails } from "config/constants";
+import { LIFI_MAX_LIFETIME_SECONDS } from "config/lifiSwap";
 import { XOXNO_SWAP_ROUTER } from "config/xoxnoSwap";
+import { checkLifiSwap } from "helpers/lifiSwap";
 import { addressToString, getInvokeContractArgs } from "helpers/soroban";
+import { SwapQuoteSource } from "services/backend";
 
 export const ROUTER_SWAP_FUNCTION = "execute_strategy";
 const ROUTE_PAYLOAD_VERSION = 1;
@@ -22,14 +25,9 @@ const ROUTE_REFERRAL_START = 4;
 const ROUTE_REFERRAL_END = 8;
 // Base plus Soroban resource fees for a swap sit far below this; a larger fee is a bug or an attack.
 const MAX_AGGREGATOR_FEE_STROOPS = 20_000_000;
-const FORBIDDEN_AUTH_FUNCTIONS = new Set([
-  "approve",
-  "burn",
-  "burn_from",
-  "transfer_from",
-]);
 
 export interface AggregatorSwapExpectation {
+  source?: SwapQuoteSource;
   network: NETWORKS;
   sender: string;
   /** Stellar Asset Contract id of the token sold. */
@@ -150,43 +148,41 @@ export const readRouteTokens = (
 };
 
 /**
- * Source-account authorization covers every call beneath the root, so the
- * sender's signature would also approve each nested token call. Only transfers
- * of the source token out of the sender, totalling at most the input, may touch
- * the sender's funds.
+ * Only direct source-token transfers from the sender to the router may be
+ * authorized beneath the approved router call, totalling at most the input.
  */
-const checkAuthTree = (
+const checkTransferAuthorization = (
   node: xdr.SorobanAuthorizedInvocation,
   expected: AggregatorSwapExpectation,
   spentBefore: bigint,
 ): bigint => {
-  let spent = spentBefore;
-  if (node.function.type === "sorobanAuthorizedFunctionTypeContractFn") {
-    const call = node.function.contractFn;
-    const name = call.functionName.toString();
-    if (FORBIDDEN_AUTH_FUNCTIONS.has(name)) {
-      fail(`authorization contains a ${name} call`);
-    }
-    const { args } = call;
-    if (
-      name === "transfer" &&
-      args.length === 3 &&
-      scValAddress(args[0]) === expected.sender
-    ) {
-      if (addressToString(call.contractAddress) !== expected.sourceToken) {
-        fail("authorization moves a token other than the source token");
-      }
-      spent += scValToBigInt(args[2]);
-      if (spent > expected.sourceAmount) {
-        fail("authorization moves more than the input amount");
-      }
-    }
+  if (
+    node.function.type !== "sorobanAuthorizedFunctionTypeContractFn" ||
+    node.subInvocations.length !== 0
+  ) {
+    return fail("authorization is not a token transfer");
+  }
+  const call = node.function.contractFn;
+  const { args } = call;
+  if (
+    call.functionName.toString() !== "transfer" ||
+    addressToString(call.contractAddress) !== expected.sourceToken ||
+    args.length !== 3 ||
+    scValAddress(args[0]) !== expected.sender ||
+    scValAddress(args[1]) !== XOXNO_SWAP_ROUTER[expected.network] ||
+    args[2].type !== "scvI128"
+  ) {
+    return fail(
+      "authorization is not the sender's source-token transfer to the router",
+    );
+  }
+  const amount = scValToBigInt(args[2]);
+  const spent = spentBefore + amount;
+  if (amount < 0n || spent > expected.sourceAmount) {
+    return fail("authorization transfer amount is out of range");
   }
 
-  return node.subInvocations.reduce(
-    (total, sub) => checkAuthTree(sub, expected, total),
-    spent,
-  );
+  return spent;
 };
 
 /**
@@ -201,7 +197,10 @@ export const verifyAggregatorSwap = (
   expected: AggregatorSwapExpectation,
 ): VerifiedAggregatorSwap => {
   const router = XOXNO_SWAP_ROUTER[expected.network];
-  if (!router) return fail("no aggregator router on this network");
+  const isLifi = expected.source === SwapQuoteSource.LIFI;
+  if (isLifi && expected.network !== NETWORKS.PUBLIC)
+    return fail("LI.FI network");
+  if (!isLifi && !router) return fail("no aggregator router on this network");
 
   const parsed = TransactionBuilder.fromXDR(
     envelopeXdr,
@@ -233,6 +232,28 @@ export const verifyAggregatorSwap = (
   }
   const call = getInvokeContractArgs(op);
   if (!call) return fail("host function is not a contract invocation");
+  if (isLifi) {
+    const bounds = tx.timeBounds;
+    const now = Math.floor(Date.now() / 1000);
+    if (
+      envelope.v1.tx.cond.type !== "precondTime" ||
+      !bounds ||
+      bounds.minTime !== "0" ||
+      BigInt(bounds.maxTime) <= BigInt(now + 20) ||
+      BigInt(bounds.maxTime) > BigInt(now + LIFI_MAX_LIFETIME_SECONDS) ||
+      resourceFeeStroops < 0n ||
+      resourceFeeStroops > feeStroops ||
+      op.func.type !== "hostFunctionTypeInvokeContract"
+    )
+      return fail("LI.FI expiry or resource fee");
+    checkLifiSwap(
+      op.func.invokeContract,
+      op.auth ?? [],
+      expected,
+      BigInt(bounds.maxTime),
+    );
+    return { feeStroops, resourceFeeStroops };
+  }
   if (call.contractId !== router) {
     return fail("contract is not the swap router");
   }
@@ -251,12 +272,25 @@ export const verifyAggregatorSwap = (
   if (args[2].type !== "scvBytes") return fail("route payload type");
   checkRoutePayload(args[2].bytes.toBytes(), expected);
 
+  if (!op.auth?.length) return fail("missing source-account authorization");
   let spent = BigInt(0);
   (op.auth ?? []).forEach((entry) => {
     if (entry.credentials.type !== "sorobanCredentialsSourceAccount") {
       fail("authorization needs a signature the wallet does not produce");
     }
-    spent = checkAuthTree(entry.rootInvocation, expected, spent);
+    const root = entry.rootInvocation;
+    if (
+      root.function.type !== "sorobanAuthorizedFunctionTypeContractFn" ||
+      op.func.type !== "hostFunctionTypeInvokeContract" ||
+      root.function.contractFn.toXDR("base64") !==
+        op.func.invokeContract.toXDR("base64")
+    ) {
+      fail("authorization root differs from the router invocation");
+    }
+    spent = root.subInvocations.reduce(
+      (total, sub) => checkTransferAuthorization(sub, expected, total),
+      spent,
+    );
   });
 
   return { feeStroops, resourceFeeStroops };

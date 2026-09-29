@@ -1,4 +1,5 @@
 import { BottomSheetModal } from "@gorhom/bottom-sheet";
+import BigNumber from "bignumber.js";
 import BottomSheet from "components/BottomSheet";
 import { List } from "components/List";
 import SignTransactionDetailsBottomSheet from "components/screens/SignTransactionDetails/components/SignTransactionDetailsBottomSheet";
@@ -62,8 +63,12 @@ const SwapReviewBottomSheet: React.FC<SwapReviewBottomSheetProps> = ({
     sourceTokenId,
     destinationToken: destinationTokenDescriptor,
   } = useSwapStore();
-  const { transactionXDR, sorobanInclusionFeeXlm } =
-    useTransactionBuilderStore();
+  const {
+    transactionXDR,
+    isSoroban,
+    sorobanResourceFeeXlm,
+    sorobanInclusionFeeXlm,
+  } = useTransactionBuilderStore();
   const { swapFee } = useSwapSettingsStore();
   const transactionDetails = useSignTransactionDetails({
     xdr: transactionXDR || "",
@@ -75,10 +80,13 @@ const SwapReviewBottomSheet: React.FC<SwapReviewBottomSheetProps> = ({
   // A classic swap shows the fee the user set and its info icon opens the fee
   // info sheet. An aggregator swap is a Soroban transaction: the fee row shows the
   // full fee of the transaction to sign and the icon opens the breakdown.
-  const isAggregatorTransaction = Boolean(pathResult?.networkFeeXlm);
-  const feeXlm = pathResult?.networkFeeXlm ?? sorobanInclusionFeeXlm ?? swapFee;
+  const feeXlm = isSoroban
+    ? new BigNumber(sorobanResourceFeeXlm ?? 0)
+        .plus(sorobanInclusionFeeXlm ?? 0)
+        .toFixed(7)
+    : swapFee;
   const { openFeeDetails, feeDetailsSheets } = useFeeDetailsBottomSheet({
-    isSorobanContext: isAggregatorTransaction,
+    isSorobanContext: isSoroban,
   });
 
   const handleOpenTransactionDetails = () => {

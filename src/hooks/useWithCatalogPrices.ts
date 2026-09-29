@@ -19,11 +19,16 @@ export const useWithCatalogPrices = (
     (state) => state.byNetwork[network]?.byContractId,
   );
   // The caller passes a fresh array on every render; its contents are the key.
-  const tokenIdsKey = tokenIds.join("|");
+  const tokenIdsKey = JSON.stringify(tokenIds);
 
   return useMemo(
     () =>
-      withCatalogPrices(prices, tokenIdsKey.split("|"), byContractId, network),
+      withCatalogPrices(
+        prices,
+        JSON.parse(tokenIdsKey) as Array<TokenIdentifier | undefined>,
+        byContractId,
+        network,
+      ),
     [prices, byContractId, network, tokenIdsKey],
   );
 };

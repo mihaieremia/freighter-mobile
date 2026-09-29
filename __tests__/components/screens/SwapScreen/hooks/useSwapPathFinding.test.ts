@@ -1,7 +1,7 @@
 /* eslint-disable @fnando/consistent-import/consistent-import */
 import { renderHook } from "@testing-library/react-hooks";
 import { useSwapPathFinding } from "components/screens/SwapScreen/hooks/useSwapPathFinding";
-import { DEFAULT_DEBOUNCE_DELAY, NETWORKS } from "config/constants";
+import { NETWORKS } from "config/constants";
 import { TokenTypeWithCustomToken } from "config/types";
 import { SwapInputSide } from "ducks/swap";
 
@@ -49,7 +49,7 @@ afterEach(() => {
   jest.useRealTimers();
 });
 
-const flush = () => jest.advanceTimersByTime(DEFAULT_DEBOUNCE_DELAY);
+const flush = () => jest.advanceTimersByTime(200);
 
 describe("useSwapPathFinding", () => {
   const mountAndFlush = () => {
@@ -65,6 +65,50 @@ describe("useSwapPathFinding", () => {
     mountAndFlush();
 
     expect(mockFindSwapPath).toHaveBeenCalledTimes(1);
+  });
+
+  it("acknowledges a valid amount immediately and quotes 200ms after the last edit", () => {
+    const { rerender } = renderHook((props) => useSwapPathFinding(props), {
+      initialProps: baseProps(),
+    });
+    expect(mockClearPath).toHaveBeenLastCalledWith(true);
+    jest.advanceTimersByTime(150);
+    rerender({ ...baseProps(), sourceAmount: "20" });
+    expect(mockClearPath).toHaveBeenLastCalledWith(true);
+    jest.advanceTimersByTime(199);
+    expect(mockFindSwapPath).not.toHaveBeenCalled();
+    jest.advanceTimersByTime(1);
+    expect(mockFindSwapPath).toHaveBeenCalledTimes(1);
+    expect(mockFindSwapPath).toHaveBeenLastCalledWith(
+      expect.objectContaining({ sourceAmount: "20" }),
+    );
+  });
+
+  it.each([
+    ["zero amount", { sourceAmount: "0" }],
+    ["invalid amount", { amountError: "invalid" }],
+    ["missing destination", { destinationTokenForPath: undefined }],
+  ])("cancels the pending quote and loading for %s", (_name, change) => {
+    const { rerender } = renderHook((props) => useSwapPathFinding(props), {
+      initialProps: baseProps(),
+    });
+    jest.advanceTimersByTime(100);
+    rerender({ ...baseProps(), ...change });
+    expect(mockClearPath).toHaveBeenLastCalledWith(false);
+    flush();
+    expect(mockFindSwapPath).not.toHaveBeenCalled();
+  });
+
+  it("invalidates the active quote on unmount and cancels the debounce", () => {
+    const { unmount } = renderHook((props) => useSwapPathFinding(props), {
+      initialProps: baseProps(),
+    });
+    mockClearPath.mockClear();
+    unmount();
+    expect(mockClearPath).toHaveBeenCalledTimes(1);
+    expect(mockClearPath).toHaveBeenCalledWith();
+    flush();
+    expect(mockFindSwapPath).not.toHaveBeenCalled();
   });
 
   it("does NOT re-run when sourceBalance is a NEW object with the SAME id (balance poll)", () => {
@@ -83,6 +127,7 @@ describe("useSwapPathFinding", () => {
 
   it.each([
     ["sourceAmount", { sourceAmount: "20" }],
+    ["swap timeout", { swapTimeout: 60 }],
     ["the source token id", { sourceBalance: makeBalance("XLM:native") }],
     [
       "the destination token id",
@@ -92,6 +137,7 @@ describe("useSwapPathFinding", () => {
     const { rerender } = mountAndFlush();
 
     rerender({ ...baseProps(), ...change });
+    expect(mockClearPath).toHaveBeenCalledTimes(2);
     flush();
 
     expect(mockFindSwapPath).toHaveBeenCalledTimes(2);

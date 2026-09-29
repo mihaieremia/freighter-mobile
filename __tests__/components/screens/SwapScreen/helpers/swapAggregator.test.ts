@@ -42,6 +42,7 @@ describe("buildAggregatorExpectation", () => {
       }),
     ).toEqual({
       network: NETWORKS.PUBLIC,
+      source: SwapQuoteSource.XOXNO,
       sender: SENDER,
       sourceToken: XLM_SAC,
       destinationToken: USDC_SAC,
@@ -102,6 +103,7 @@ describe("isStaleAggregatorQuote", () => {
       AGGREGATOR_QUOTE_MAX_AGE_MS,
     ],
     ["a fresh aggregator quote", false, {}, 5_000],
+    ["an old LI.FI quote", true, { source: SwapQuoteSource.LIFI }, 60_000],
     [
       "a classic quote of any age",
       false,

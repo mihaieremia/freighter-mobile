@@ -958,7 +958,7 @@ describe("useSwapTokenLookup — active search", () => {
   });
 });
 
-describe("useSwapTokenLookup — holdsOnly (Swap from picker)", () => {
+describe("useSwapTokenLookup — held-only and remote search timing", () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
@@ -987,7 +987,7 @@ describe("useSwapTokenLookup — holdsOnly (Swap from picker)", () => {
     expect(mockStores.getStellarExpertTopTokens).not.toHaveBeenCalled();
   });
 
-  it("returns held-only search results without hitting stellar.expert when holdsOnly is true", async () => {
+  it("returns held-only matches without waiting for a timer or hitting stellar.expert", async () => {
     const held = buildHeldBalances();
 
     const { result } = renderHook(() =>
@@ -1006,8 +1006,6 @@ describe("useSwapTokenLookup — holdsOnly (Swap from picker)", () => {
       result.current.handleSearch("USDC");
     });
 
-    await settleDebounce();
-
     // stellar.expert searchToken must NOT have been called — the held
     // match is computed entirely in-memory.
     expect(stellarExpert.searchToken).not.toHaveBeenCalled();
@@ -1018,9 +1016,22 @@ describe("useSwapTokenLookup — holdsOnly (Swap from picker)", () => {
     // holdsOnly never populates verified/unverified.
     expect(result.current.verifiedSearchMatches).toEqual([]);
     expect(result.current.unverifiedSearchMatches).toEqual([]);
+    expect(result.current.status).toBe("success");
+
+    act(() => {
+      result.current.handleSearch("NONEXISTENT");
+    });
+    expect(result.current.heldSearchMatches).toEqual([]);
+    expect(result.current.status).toBe("success");
+
+    act(() => {
+      result.current.handleSearch("");
+    });
+    expect(result.current.heldSearchMatches).toEqual([]);
+    expect(result.current.status).toBe("idle");
   });
 
-  it("flips status to LOADING synchronously on handleSearch (covers the debounce gap)", async () => {
+  it("keeps remote search debounced while marking it LOADING immediately", async () => {
     // Regression: consumers gate the "No tokens match …" empty-state on
     // status !== LOADING. Before this fix, status stayed at SUCCESS/IDLE
     // during the 500ms debounce window, causing the label to flash with
@@ -1032,7 +1043,7 @@ describe("useSwapTokenLookup — holdsOnly (Swap from picker)", () => {
       useSwapTokenLookup({
         network: NETWORKS.PUBLIC,
         balanceItems: held,
-        holdsOnly: true,
+        holdsOnly: false,
       }),
     );
 
@@ -1047,15 +1058,14 @@ describe("useSwapTokenLookup — holdsOnly (Swap from picker)", () => {
       result.current.handleSearch("X");
     });
 
-    // Synchronously after handleSearch — debounce hasn't fired yet, but
-    // status must already be LOADING so the empty-state label is gated.
+    // Remote search still waits for its debounce; stale empty results stay hidden.
     expect(result.current.status).toBe("loading");
     expect(result.current.heldSearchMatches).toEqual([]);
     expect(result.current.verifiedSearchMatches).toEqual([]);
     expect(result.current.unverifiedSearchMatches).toEqual([]);
+    expect(stellarExpert.searchToken).not.toHaveBeenCalled();
 
-    // Settle the debounce → status flips to SUCCESS (with empty results
-    // for this non-matching term).
+    // Only remote search waits for the debounce before it can succeed.
     await settleDebounce();
     expect(result.current.status).toBe("success");
   });
@@ -1078,8 +1088,6 @@ describe("useSwapTokenLookup — holdsOnly (Swap from picker)", () => {
     act(() => {
       result.current.handleSearch("NONEXISTENT");
     });
-
-    await settleDebounce();
 
     expect(stellarExpert.searchToken).not.toHaveBeenCalled();
     expect(result.current.heldSearchMatches).toEqual([]);

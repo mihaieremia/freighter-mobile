@@ -95,6 +95,76 @@ describe("verifyAggregatorSwap", () => {
     expect(() => verifyAggregatorSwap("AAAA", expected)).toThrow();
   });
 
+  it.each([
+    ["an unrelated authorization", "set_admin"],
+    ["an unrecognized spending method", "withdraw"],
+    ["an approval", "approve"],
+  ])("rejects %s", (_name, functionName) => {
+    const env = xdr.TransactionEnvelope.fromXDR(fx.envelopeXdr, "base64");
+    const { tx } = xdr.expectUnionVariant(env, "envelopeTypeTx").v1;
+    const op = xdr.expectUnionVariant(
+      tx.operations[0].body,
+      "invokeHostFunction",
+    );
+    const transfer =
+      op.invokeHostFunctionOp.auth[0].rootInvocation.subInvocations[0];
+    Reflect.set(
+      xdr.expectUnionVariant(
+        transfer.function,
+        "sorobanAuthorizedFunctionTypeContractFn",
+      ).contractFn,
+      "functionName",
+      Buffer.from(functionName),
+    );
+
+    expect(() => verifyAggregatorSwap(env.toXDR("base64"), expected)).toThrow(
+      /Unsafe swap transaction/,
+    );
+  });
+
+  it.each([
+    "malformed",
+    "negative",
+    "another recipient",
+    "another root",
+    "nested",
+    "missing",
+  ])("rejects %s transfer authorization", (mutation) => {
+    const env = xdr.TransactionEnvelope.fromXDR(fx.envelopeXdr, "base64");
+    const { tx } = xdr.expectUnionVariant(env, "envelopeTypeTx").v1;
+    const op = xdr.expectUnionVariant(
+      tx.operations[0].body,
+      "invokeHostFunction",
+    );
+    const root = op.invokeHostFunctionOp.auth[0].rootInvocation;
+    const transfer = xdr.expectUnionVariant(
+      root.subInvocations[0].function,
+      "sorobanAuthorizedFunctionTypeContractFn",
+    ).contractFn;
+    const [from, to] = transfer.args;
+    if (mutation === "malformed") transfer.args.pop();
+    if (mutation === "negative") {
+      transfer.args[2] = xdr.ScVal.scvI128(
+        new xdr.Int128Parts({ hi: -1n, lo: 0xffffffffffffffffn }),
+      );
+    }
+    if (mutation === "another recipient") transfer.args[1] = from;
+    if (mutation === "another root") {
+      xdr.expectUnionVariant(
+        root.function,
+        "sorobanAuthorizedFunctionTypeContractFn",
+      ).contractFn.args[0] = to;
+    }
+    if (mutation === "nested")
+      root.subInvocations[0].subInvocations.push(
+        xdr.SorobanAuthorizedInvocation.fromXDR(root.subInvocations[0].toXDR()),
+      );
+    if (mutation === "missing") op.invokeHostFunctionOp.auth.splice(0);
+    expect(() => verifyAggregatorSwap(env.toXDR("base64"), expected)).toThrow(
+      /Unsafe swap transaction/,
+    );
+  });
+
   describe("to a Soroban-native token", () => {
     const sorobanExpected = {
       ...expected,

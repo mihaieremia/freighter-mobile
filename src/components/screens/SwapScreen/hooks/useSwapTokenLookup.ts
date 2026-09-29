@@ -75,7 +75,7 @@ export interface SwapTokenLookupResult {
   isTrendingLoading: boolean;
   /** Current search term (synced with handleSearch input). Empty string = idle mode. */
   searchTerm: string;
-  /** Update the search term; triggers debounced active-search fetch. */
+  /** Update the search term; held-only matches are immediate, remote search is debounced. */
   handleSearch: (term: string) => void;
   /** Clear the search term and return to idle mode. */
   resetSearch: () => void;
@@ -621,8 +621,7 @@ export const useSwapTokenLookup = ({
     [enhanceWithSecurityInfo, hasExistingTrustline, network, holdsOnly],
   );
 
-  // Debounce wiring: a user keystroke updates `searchTerm` immediately so the
-  // input stays responsive; the network call is debounced via a timer.
+  // Only network searches need debouncing; held-only matching is in-memory.
   // We use a plain setTimeout instead of the `useDebounce` helper because
   // the trailing-keystroke cancellation needs to share the same
   // AbortController lifecycle as the in-flight fetch.
@@ -635,12 +634,17 @@ export const useSwapTokenLookup = ({
       return undefined;
     }
 
+    if (holdsOnly) {
+      performSearch(searchTerm);
+      return undefined;
+    }
+
     const timer = setTimeout(() => {
       performSearch(searchTerm);
     }, DEFAULT_DEBOUNCE_DELAY);
 
     return () => clearTimeout(timer);
-  }, [searchTerm, performSearch]);
+  }, [searchTerm, performSearch, holdsOnly]);
 
   const handleSearch = useCallback((term: string) => {
     // Invalidate any in-flight search so a slow prior response can't

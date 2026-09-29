@@ -29,6 +29,13 @@ describe("useWithCatalogPrices", () => {
     expect(result.current[XAUM_ID].currentPrice?.toString()).toBe("4200");
   });
 
+  it("preserves symbols containing the memo key delimiter", () => {
+    seedCatalog(NETWORKS.PUBLIC, catalogSoroban);
+    const tokenId = `XA|UM:${CATALOG_SOROBAN_CONTRACT}`;
+    const { result } = renderHook(() => useWithCatalogPrices({}, [tokenId]));
+    expect(result.current[tokenId].currentPrice?.toString()).toBe("4200");
+  });
+
   it("fills a zero price but keeps the 24h change", () => {
     seedCatalog(NETWORKS.PUBLIC, catalogSoroban);
     const change = new BigNumber("0.01");

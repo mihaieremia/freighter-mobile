@@ -1464,6 +1464,19 @@ describe("Backend Service - swap routes", () => {
         { params: { network } },
       );
     });
+
+    it("passes quote cancellation in the HTTP config, not the request body", async () => {
+      const { signal } = new AbortController();
+      (freighterBackendV2.post as jest.Mock).mockResolvedValueOnce({
+        data: { data: quote },
+      });
+      await fetchSwapQuote({ network, ...quoteBody, signal });
+      expect(freighterBackendV2.post).toHaveBeenCalledWith(
+        "/swap/quote",
+        quoteBody,
+        { params: { network }, signal },
+      );
+    });
   });
 
   describe("fetchSwapTokens", () => {

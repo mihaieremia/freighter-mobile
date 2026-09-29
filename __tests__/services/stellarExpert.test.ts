@@ -15,6 +15,7 @@ jest.mock("services/apiFactory", () => {
   const get = jest.fn();
   return {
     createApiService: jest.fn(() => ({ get })),
+    isApiError: jest.requireActual("services/apiFactory").isApiError,
     isRequestCanceled: jest.fn(() => false),
     logApiError: jest.fn(),
     __get: get, // expose for assertions
@@ -27,6 +28,7 @@ const apiFactory = require("services/apiFactory");
 describe("stellarExpert service", () => {
   beforeEach(() => {
     apiFactory.__get.mockReset();
+    apiFactory.logApiError.mockClear();
   });
 
   describe("fetchTrendingAssets", () => {
@@ -84,10 +86,32 @@ describe("stellarExpert service", () => {
       );
     });
 
-    it("returns null when the request keeps failing", async () => {
-      apiFactory.__get.mockRejectedValue(new Error("404"));
+    it("returns null quietly when the explorer has not indexed the transaction", async () => {
+      apiFactory.__get.mockRejectedValue({
+        status: 404,
+        isNetworkError: false,
+        message: "Request failed with status code 404",
+      });
 
       expect(await fetchTransactionMeta("abc", NETWORKS.PUBLIC)).toBeNull();
+      expect(apiFactory.logApiError).not.toHaveBeenCalled();
+    });
+
+    it("still logs unexpected metadata failures", async () => {
+      const error = {
+        status: 500,
+        isNetworkError: false,
+        message: "Request failed with status code 500",
+      };
+      apiFactory.__get.mockRejectedValue(error);
+
+      expect(await fetchTransactionMeta("abc", NETWORKS.PUBLIC)).toBeNull();
+      expect(apiFactory.logApiError).toHaveBeenCalledWith(
+        "stellarExpert",
+        "Network unreachable while fetching transaction meta",
+        "Error fetching transaction meta",
+        error,
+      );
     });
   });
 });

@@ -6,6 +6,7 @@ import { getApiStellarExpertUrl } from "helpers/stellarExpert";
 import {
   RetryConfig,
   createApiService,
+  isApiError,
   isRequestCanceled,
   logApiError,
 } from "services/apiFactory";
@@ -140,6 +141,11 @@ export const fetchTransactionMeta = async (
 
     return meta;
   } catch (error) {
+    // A confirmed transaction may not have reached the explorer's index yet.
+    if (isApiError(error) && error.status === 404) {
+      return null;
+    }
+
     logApiError(
       "stellarExpert",
       "Network unreachable while fetching transaction meta",
