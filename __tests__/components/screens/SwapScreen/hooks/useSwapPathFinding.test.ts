@@ -3,11 +3,13 @@ import { renderHook } from "@testing-library/react-hooks";
 import { useSwapPathFinding } from "components/screens/SwapScreen/hooks/useSwapPathFinding";
 import { DEFAULT_DEBOUNCE_DELAY, NETWORKS } from "config/constants";
 import { TokenTypeWithCustomToken } from "config/types";
+import { SwapInputSide } from "ducks/swap";
 
 const mockFindSwapPath = jest.fn();
 const mockClearPath = jest.fn();
 
 jest.mock("ducks/swap", () => ({
+  ...jest.requireActual("ducks/swap"),
   useSwapStore: () => ({
     findSwapPath: mockFindSwapPath,
     clearPath: mockClearPath,
@@ -27,7 +29,10 @@ const baseProps = (): HookProps => ({
   sourceBalance: makeBalance("USDC:GA5..."),
   destinationTokenForPath: makeBalance("AQUA:GBNZ..."),
   sourceAmount: "10",
+  inputSide: SwapInputSide.SOURCE,
+  destinationInputAmount: "0",
   swapSlippage: 2,
+  swapTimeout: 180,
   network: NETWORKS.PUBLIC,
   publicKey: "GTEST...",
   amountError: null,
@@ -47,21 +52,23 @@ afterEach(() => {
 const flush = () => jest.advanceTimersByTime(DEFAULT_DEBOUNCE_DELAY);
 
 describe("useSwapPathFinding", () => {
-  it("runs path-finding once on mount", () => {
-    renderHook((props) => useSwapPathFinding(props), {
+  const mountAndFlush = () => {
+    const view = renderHook((props) => useSwapPathFinding(props), {
       initialProps: baseProps(),
     });
     flush();
+
+    return view;
+  };
+
+  it("runs path-finding once on mount", () => {
+    mountAndFlush();
 
     expect(mockFindSwapPath).toHaveBeenCalledTimes(1);
   });
 
   it("does NOT re-run when sourceBalance is a NEW object with the SAME id (balance poll)", () => {
-    const { rerender } = renderHook((props) => useSwapPathFinding(props), {
-      initialProps: baseProps(),
-    });
-    flush();
-    expect(mockFindSwapPath).toHaveBeenCalledTimes(1);
+    const { rerender } = mountAndFlush();
 
     // Simulate the 30s balance poll: brand-new object refs, identical ids.
     rerender({
@@ -74,43 +81,17 @@ describe("useSwapPathFinding", () => {
     expect(mockFindSwapPath).toHaveBeenCalledTimes(1);
   });
 
-  it("DOES re-run when sourceAmount changes", () => {
-    const { rerender } = renderHook((props) => useSwapPathFinding(props), {
-      initialProps: baseProps(),
-    });
-    flush();
-    expect(mockFindSwapPath).toHaveBeenCalledTimes(1);
+  it.each([
+    ["sourceAmount", { sourceAmount: "20" }],
+    ["the source token id", { sourceBalance: makeBalance("XLM:native") }],
+    [
+      "the destination token id",
+      { destinationTokenForPath: makeBalance("yXLM:GBNZ...") },
+    ],
+  ])("DOES re-run when %s changes", (_what, change) => {
+    const { rerender } = mountAndFlush();
 
-    rerender({ ...baseProps(), sourceAmount: "20" });
-    flush();
-
-    expect(mockFindSwapPath).toHaveBeenCalledTimes(2);
-  });
-
-  it("DOES re-run when the source token id changes", () => {
-    const { rerender } = renderHook((props) => useSwapPathFinding(props), {
-      initialProps: baseProps(),
-    });
-    flush();
-    expect(mockFindSwapPath).toHaveBeenCalledTimes(1);
-
-    rerender({ ...baseProps(), sourceBalance: makeBalance("XLM:native") });
-    flush();
-
-    expect(mockFindSwapPath).toHaveBeenCalledTimes(2);
-  });
-
-  it("DOES re-run when the destination token id changes", () => {
-    const { rerender } = renderHook((props) => useSwapPathFinding(props), {
-      initialProps: baseProps(),
-    });
-    flush();
-    expect(mockFindSwapPath).toHaveBeenCalledTimes(1);
-
-    rerender({
-      ...baseProps(),
-      destinationTokenForPath: makeBalance("yXLM:GBNZ..."),
-    });
+    rerender({ ...baseProps(), ...change });
     flush();
 
     expect(mockFindSwapPath).toHaveBeenCalledTimes(2);
@@ -134,7 +115,70 @@ describe("useSwapPathFinding", () => {
         sourceBalance: latestSource,
         sourceAmount: "30",
         slippage: 2,
+        timeoutSeconds: 180,
       }),
     );
+  });
+
+  describe("when the user typed the amount to receive", () => {
+    const exactOutProps = (): HookProps => ({
+      ...baseProps(),
+      sourceAmount: "0",
+      inputSide: SwapInputSide.DESTINATION,
+      destinationInputAmount: "2.3",
+    });
+
+    const mount = (props = exactOutProps()) =>
+      renderHook((p) => useSwapPathFinding(p), { initialProps: props });
+
+    it("asks for the typed receive amount, not a source amount", () => {
+      mount();
+      flush();
+
+      expect(mockFindSwapPath).toHaveBeenCalledTimes(1);
+      const params = mockFindSwapPath.mock.calls[0][0];
+      expect(params.destinationAmount).toBe("2.3");
+      expect(params).not.toHaveProperty("sourceAmount");
+    });
+
+    it("does NOT re-run when the amount to sell, which the quote derives, changes", () => {
+      const { rerender } = mount();
+      flush();
+
+      rerender({ ...exactOutProps(), sourceAmount: "10.0489927" });
+      flush();
+
+      expect(mockFindSwapPath).toHaveBeenCalledTimes(1);
+    });
+
+    it("DOES re-run when the typed receive amount changes", () => {
+      const { rerender } = mount();
+      flush();
+
+      rerender({ ...exactOutProps(), destinationInputAmount: "2.4" });
+      flush();
+
+      expect(mockFindSwapPath).toHaveBeenCalledTimes(2);
+      expect(mockFindSwapPath.mock.calls[1][0].destinationAmount).toBe("2.4");
+    });
+
+    it("clears the path when the typed receive amount is zero", () => {
+      mount({ ...exactOutProps(), destinationInputAmount: "0" });
+      flush();
+
+      expect(mockFindSwapPath).not.toHaveBeenCalled();
+      expect(mockClearPath).toHaveBeenCalled();
+    });
+
+    it("re-runs when the user switches back to typing the amount to sell", () => {
+      const { rerender } = mount();
+      flush();
+
+      rerender({ ...baseProps(), sourceAmount: "10" });
+      flush();
+
+      expect(mockFindSwapPath).toHaveBeenCalledTimes(2);
+      expect(mockFindSwapPath.mock.calls[1][0].sourceAmount).toBe("10");
+    });
   });
 });

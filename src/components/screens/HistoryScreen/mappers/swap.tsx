@@ -23,6 +23,7 @@ import { TokenTypeWithCustomToken } from "config/types";
 import { isNativeAssetId } from "helpers/assetIdentity";
 import { formatTokenForDisplay } from "helpers/formatAmount";
 import { getIconUrl } from "helpers/getIconUrl";
+import { isContractId } from "helpers/soroban";
 import useColors, { ThemeColors } from "hooks/useColors";
 import { t } from "i18next";
 import React from "react";
@@ -38,6 +39,15 @@ interface SwapHistoryItemData {
   themeColors: ThemeColors;
   xdr: string;
 }
+
+/**
+ * The asset the icon lookups take: a Soroban token is named by its contract
+ * id, a classic asset by its code and issuer.
+ */
+const getIconAsset = (code: string, issuer?: string) =>
+  issuer && isContractId(issuer)
+    ? { code, contractId: issuer }
+    : { code, issuer: issuer || "" };
 
 /**
  * Maps swap operation data to history item data
@@ -59,11 +69,18 @@ export const mapSwapHistoryItem = async ({
     asset_issuer: tokenIssuer,
     source_asset_code: sourceTokenCode,
     source_asset_issuer: sourceTokenIssuer,
+    source_icon_url: sourceIconUrl,
+    icon_url: destIconUrl,
   } = operation;
 
   const srcTokenCode = sourceTokenCode || NATIVE_TOKEN_CODE;
   const destTokenCodeFinal = destTokenCode || NATIVE_TOKEN_CODE;
-  const formattedAmount = `+${formatTokenForDisplay(amount, destTokenCodeFinal)}`;
+  // The received amount is empty when it could not be read (a Soroban token
+  // leg of an aggregator swap); the row then shows what was sold instead.
+  const hasReceivedAmount = !!amount;
+  const formattedAmount = hasReceivedAmount
+    ? `+${formatTokenForDisplay(amount, destTokenCodeFinal)}`
+    : `-${formatTokenForDisplay(operation.source_amount || "", srcTokenCode)}`;
 
   // Nativeness comes from the operation record's own type discriminant.
   const isSourceNative = isNativeAssetId(operation.source_asset_type);
@@ -75,24 +92,19 @@ export const mapSwapHistoryItem = async ({
     isDestNative
       ? Promise.resolve(undefined)
       : getIconUrl({
-          asset: {
-            code: destTokenCodeFinal || "",
-            issuer: tokenIssuer || "",
-          },
+          asset: getIconAsset(destTokenCodeFinal, tokenIssuer),
           network,
         }),
     isSourceNative
       ? Promise.resolve(undefined)
       : getIconUrl({
-          asset: {
-            code: srcTokenCode || "",
-            issuer: sourceTokenIssuer || "",
-          },
+          asset: getIconAsset(srcTokenCode, sourceTokenIssuer),
           network,
         }),
   ]);
 
-  // Create asset diffs for swap: one debit (sent) and one credit (received)
+  // Create asset diffs for swap: one debit (sent) and, when its amount is
+  // known, one credit (received)
   const assetDiffs: AssetDiffSummary[] = [
     // Debit: Source asset being sold
     {
@@ -104,14 +116,18 @@ export const mapSwapHistoryItem = async ({
       icon: sourceIcon,
     },
     // Credit: Destination asset being bought
-    {
-      assetCode: destTokenCodeFinal,
-      assetIssuer: tokenIssuer || null,
-      decimals: DEFAULT_DECIMALS,
-      amount,
-      isCredit: true,
-      icon: destIcon,
-    },
+    ...(hasReceivedAmount
+      ? [
+          {
+            assetCode: destTokenCodeFinal,
+            assetIssuer: tokenIssuer || null,
+            decimals: DEFAULT_DECIMALS,
+            amount,
+            isCredit: true,
+            icon: destIcon,
+          },
+        ]
+      : []),
   ];
 
   const ActionIconComponent = (
@@ -124,8 +140,9 @@ export const mapSwapHistoryItem = async ({
       variant="swap"
       sourceOne={{
         altText: "Swap source token logo",
-        // For the native asset, use the Stellar logo directly
-        image: isSourceNative ? logos.stellar : undefined,
+        // For the native asset, use the Stellar logo directly; a Soroban token
+        // brings the catalog logo, used when the icon store has none
+        image: isSourceNative ? logos.stellar : sourceIconUrl,
         token: isSourceNative
           ? undefined
           : {
@@ -141,8 +158,9 @@ export const mapSwapHistoryItem = async ({
       }}
       sourceTwo={{
         altText: "Swap destination token logo",
-        // For the native asset, use the Stellar logo directly
-        image: isDestNative ? logos.stellar : undefined,
+        // For the native asset, use the Stellar logo directly; a Soroban token
+        // brings the catalog logo, used when the icon store has none
+        image: isDestNative ? logos.stellar : destIconUrl,
         token: isDestNative
           ? undefined
           : {
@@ -195,7 +213,7 @@ export const mapSwapHistoryItem = async ({
     actionText: t("history.transactionHistory.swapped"),
     dateText: date,
     amountText: formattedAmount,
-    isAddingFunds: true,
+    isAddingFunds: hasReceivedAmount,
     ActionIconComponent,
     IconComponent,
     transactionStatus: TransactionStatus.SUCCESS,

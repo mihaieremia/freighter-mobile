@@ -1,10 +1,16 @@
 import Blockaid from "@blockaid/client";
 import { NativeStackNavigationProp } from "@react-navigation/native-stack";
-import { TransactionBuilder } from "@stellar/stellar-sdk";
 import BigNumber from "bignumber.js";
 import {
+  addBoughtTokenToBalances,
+  buildAggregatorExpectation,
   getQuoteExpiredOperationCodes,
   getTokenFromBalance,
+  isAggregatorSlippageRejection,
+  isStaleAggregatorQuote,
+  reportSettledSwap,
+  resolveDestinationDisplayPrice,
+  withDescriptorPrice,
 } from "components/screens/SwapScreen/helpers";
 import { AnalyticsEvent } from "config/analyticsConfig";
 import { NETWORKS, mapNetworkToNetworkDetails } from "config/constants";
@@ -15,12 +21,7 @@ import {
   ROOT_NAVIGATOR_ROUTES,
   MAIN_TAB_ROUTES,
 } from "config/routes";
-import {
-  PricedBalance,
-  NativeToken,
-  NonNativeToken,
-  TokenIdentifier,
-} from "config/types";
+import { PricedBalance, NativeToken, NonNativeToken } from "config/types";
 import { ActiveAccount } from "ducks/auth";
 import { useBalancesStore } from "ducks/balances";
 import { useHistoryStore } from "ducks/history";
@@ -28,8 +29,10 @@ import { usePricesStore } from "ducks/prices";
 import { useRemoteConfigStore } from "ducks/remoteConfig";
 import { SwapPathResult, useSwapStore } from "ducks/swap";
 import { useSwapSettingsStore } from "ducks/swapSettings";
+import { useTokenCatalogStore } from "ducks/tokenCatalog";
 import {
   SubmitResultCodes,
+  SubmitTransactionOutcome,
   useTransactionBuilderStore,
 } from "ducks/transactionBuilder";
 import { formatTokenIdentifier, getTokenIdentifier } from "helpers/balances";
@@ -37,19 +40,14 @@ import {
   ConfirmationSnapshotHandle,
   startConfirmationPriceSnapshot,
 } from "helpers/confirmationPriceSnapshot";
-import {
-  findPathPaymentStrictSendIndex,
-  getSettledPathPaymentStrictSendAmount,
-} from "helpers/transactionResult";
+import { withCatalogPrices } from "helpers/tokenCatalog";
 import {
   AssetIdentity,
+  ROUTER_SLIPPAGE_REASON_CODE,
   canonicalIdFromIdentity,
   classifyAssetIdentity,
-  computeExecutionSlippagePct,
-  computeUsdSlippagePct,
   deriveLegUsd,
   getFailureCategory,
-  LegUsdStatus,
   pickReasonCode,
 } from "helpers/usdVolume";
 import { useBlockaidTransaction } from "hooks/blockaid/useBlockaidTransaction";
@@ -59,6 +57,9 @@ import { useToast } from "providers/ToastProvider";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { analytics } from "services/analytics";
 import { FailureVolume } from "services/analytics/types";
+import { SwapQuoteSource } from "services/backend";
+import { SecurityLevel } from "services/blockaid/constants";
+import { assessTransactionSecurity } from "services/blockaid/helper";
 
 /**
  * `destinationTokenInput` is either the user's held PricedBalance for
@@ -99,6 +100,93 @@ interface UseSwapTransactionResult {
   transactionScanResult: Blockaid.StellarTransactionScanResponse | undefined;
 }
 
+/**
+ * Quotes the swap again in place, with the current slippage and timeout settings.
+ * Resolves to the quote now in the store: a failed refresh leaves the previous
+ * quote there (or none), so callers compare it with the one they held. A silent
+ * refresh does not show as loading on the amount screen.
+ */
+const requote = async ({
+  sourceBalance,
+  destinationBalance,
+  sourceAmount,
+  network,
+  publicKey,
+  silent = true,
+}: {
+  sourceBalance: PricedBalance;
+  destinationBalance: PricedBalance;
+  sourceAmount: string;
+  network: NETWORKS;
+  publicKey: string;
+  silent?: boolean;
+}): Promise<SwapPathResult | null> => {
+  const { swapSlippage, swapTimeout } = useSwapSettingsStore.getState();
+  await useSwapStore.getState().findSwapPath({
+    sourceBalance,
+    destinationBalance,
+    sourceAmount,
+    slippage: swapSlippage,
+    timeoutSeconds: swapTimeout,
+    network,
+    publicKey,
+    silent,
+  });
+
+  return useSwapStore.getState().pathResult;
+};
+
+/** A submit failure, carrying what the terminal event classifies it by. */
+type SubmitFailure = Error & {
+  quoteExpiredCodes?: string[];
+  resultCodes?: SubmitResultCodes | null;
+  httpStatus?: number | null;
+  isProtocolAnswer?: boolean;
+};
+
+/**
+ * Builds the error thrown for a rejected submit, carrying the attempt's own
+ * result codes, HTTP status and protocol-answer flag so the catch reports the
+ * real reason instead of falling back to `unknown` / `transport`.
+ */
+const toSubmitFailure = (
+  message: string,
+  outcome: SubmitTransactionOutcome,
+): SubmitFailure => {
+  const failure: SubmitFailure = new Error(message);
+  failure.resultCodes = outcome.resultCodes;
+  failure.httpStatus = outcome.httpStatus;
+  failure.isProtocolAnswer = outcome.isProtocolAnswer;
+
+  return failure;
+};
+
+/**
+ * Records that the swap's trustline is on chain. The event carries the asset the
+ * user added, read from the swap store's destination.
+ */
+const trackTrustlineAdded = (assetCode: string): void => {
+  const { destinationToken } = useSwapStore.getState();
+  if (destinationToken?.requiresTrustline) {
+    analytics.track(AnalyticsEvent.SWAP_TRUSTLINE_ADDED, {
+      asset_code: assetCode,
+      asset_issuer: destinationToken.issuer ?? "",
+    });
+  }
+};
+
+/** Trustline-first swap scan levels that block the swap, and the error text key of each. */
+const BLOCKED_SWAP_ERROR_KEYS: Partial<
+  Record<
+    SecurityLevel,
+    | "swapScreen.errors.trustlineAddedSwapMalicious"
+    | "swapScreen.errors.trustlineAddedSwapSuspicious"
+  >
+> = {
+  [SecurityLevel.MALICIOUS]: "swapScreen.errors.trustlineAddedSwapMalicious",
+  [SecurityLevel.SUSPICIOUS]: "swapScreen.errors.trustlineAddedSwapSuspicious",
+};
+
 export const useSwapTransaction = ({
   sourceAmount,
   sourceBalance,
@@ -111,8 +199,13 @@ export const useSwapTransaction = ({
   const [isProcessing, setIsProcessing] = useState(false);
   const [transactionScanResult, setTransactionScanResult] =
     useState<UseSwapTransactionResult["transactionScanResult"]>(undefined);
-  const { buildSwapTransaction, signTransaction, submitTransaction } =
-    useTransactionBuilderStore();
+  const {
+    buildSwapTransaction,
+    buildTrustlineTransaction,
+    prepareAggregatorSwap,
+    signTransaction,
+    submitTransaction,
+  } = useTransactionBuilderStore();
   const { fetchAccountHistory } = useHistoryStore();
   const { scanTransaction } = useBlockaidTransaction();
   const { t } = useAppTranslation();
@@ -128,6 +221,19 @@ export const useSwapTransaction = ({
     swapBalancesRef.current = { sourceBalance, destinationTokenInput };
   }, [sourceBalance, destinationTokenInput]);
 
+  const scanSafely = useCallback(
+    async (xdr: string) => {
+      try {
+        return await scanTransaction(xdr, "internal");
+      } catch (error) {
+        logger.error("SwapTransaction", "Transaction scan failed", error);
+
+        return undefined;
+      }
+    },
+    [scanTransaction],
+  );
+
   const setupSwapTransaction = useCallback(async () => {
     if (
       !sourceBalance ||
@@ -141,6 +247,20 @@ export const useSwapTransaction = ({
     // Get fresh settings values each time the function is called
     const { swapFee: freshSwapFee, swapTimeout: freshSwapTimeout } =
       useSwapSettingsStore.getState();
+
+    // An aggregator transaction expires and its simulation ages, so a quote
+    // that sat on the amount screen is refreshed before it is verified.
+    let quote = pathResult;
+    if (isStaleAggregatorQuote(quote)) {
+      quote =
+        (await requote({
+          sourceBalance,
+          destinationBalance: destinationTokenInput,
+          sourceAmount,
+          network,
+          publicKey: account.publicKey,
+        })) ?? quote;
+    }
 
     // Derive includeTrustline from the swap store's destinationToken.
     // When requiresTrustline === true the user doesn't yet hold a trustline for the
@@ -162,44 +282,73 @@ export const useSwapTransaction = ({
       };
     }
 
-    const transactionXDR = await buildSwapTransaction({
-      sourceAmount,
-      sourceBalance,
-      destinationBalance: destinationTokenInput,
-      path: pathResult.path,
-      destinationAmount: pathResult.destinationAmount,
-      destinationAmountMin: pathResult.destinationAmountMin,
-      transactionFee: freshSwapFee,
-      transactionTimeout: freshSwapTimeout,
-      network,
-      senderAddress: account.publicKey,
-      includeTrustline,
-    });
+    let transactionXDR: string | null;
+    if (quote.source === SwapQuoteSource.XOXNO) {
+      // A Soroban swap is a single operation, so a missing trustline is opened
+      // by a transaction of its own first; the swap is prepared after it lands.
+      transactionXDR =
+        quote.requiresTrustlineFirst && includeTrustline
+          ? await buildTrustlineTransaction({
+              ...includeTrustline,
+              transactionFee: freshSwapFee,
+              transactionTimeout: freshSwapTimeout,
+              network,
+              senderAddress: account.publicKey,
+            })
+          : prepareAggregatorSwap({
+              envelopeXdr: quote.aggregatorEnvelopeXdr ?? "",
+              expectation: buildAggregatorExpectation({
+                network,
+                sender: account.publicKey,
+                sourceBalance,
+                destinationBalance: destinationTokenInput,
+                sourceAmount,
+                pathResult: quote,
+              }),
+            });
+    } else {
+      transactionXDR = await buildSwapTransaction({
+        sourceAmount,
+        sourceBalance,
+        destinationBalance: destinationTokenInput,
+        path: quote.path,
+        destinationAmount: quote.destinationAmount,
+        destinationAmountMin: quote.destinationAmountMin,
+        transactionFee: freshSwapFee,
+        transactionTimeout: freshSwapTimeout,
+        network,
+        senderAddress: account.publicKey,
+        includeTrustline,
+      });
+    }
 
     if (!transactionXDR) {
-      // Get the error message stored in the transaction builder
+      // The builder stored and logged the error; users see the translated message.
       const { error: builderError } = useTransactionBuilderStore.getState();
-      throw new Error(builderError || "Failed to build swap transaction");
+      throw new Error(
+        __DEV__
+          ? builderError || "Failed to build swap transaction"
+          : t("swapScreen.errors.failedToSetupTransaction"),
+      );
     }
-    try {
-      const scanResult = await scanTransaction(transactionXDR, "internal");
-      setTransactionScanResult(scanResult);
-      return { scanResult };
-    } catch (error) {
-      logger.error("SwapTransaction", "Transaction scan failed", error);
-      // Scan failed → undefined classifies as unable-to-scan downstream.
-      setTransactionScanResult(undefined);
-      return { scanResult: undefined };
-    }
+
+    // A failed scan is undefined, which classifies as unable-to-scan downstream.
+    const scanResult = await scanSafely(transactionXDR);
+    setTransactionScanResult(scanResult);
+
+    return { scanResult };
   }, [
     sourceBalance,
     destinationTokenInput,
     pathResult,
     buildSwapTransaction,
+    buildTrustlineTransaction,
+    prepareAggregatorSwap,
     account?.publicKey,
     sourceAmount,
     network,
-    scanTransaction,
+    scanSafely,
+    t,
   ]);
 
   const executeSwap = useCallback(async () => {
@@ -231,6 +380,22 @@ export const useSwapTransaction = ({
     let sourceCanonicalId = "";
     let destCanonicalId = "";
 
+    // Signs the built transaction, or throws: the catch below is this flow's
+    // single failure path (swap.failed without volume, since nothing reached
+    // the network, and the error toast). The user already approved at the review
+    // sheet, so a signing failure is a fault, not a decision.
+    const signOrThrow = (secretKey: string): string => {
+      const signedXDR = signTransaction({ secretKey, network });
+      if (!signedXDR) {
+        const { error: signingError } = useTransactionBuilderStore.getState();
+        analytics.trackInternalSignedTransactionError(signingError);
+        throw new Error(signingError || "Failed to sign transaction");
+      }
+      analytics.trackInternalSignedTransaction();
+
+      return signedXDR;
+    };
+
     try {
       // Abort cleanly if an auto-lock engaged after the swap was prepared.
       // Return (don't throw): being locked isn't a swap failure, so skip the
@@ -258,25 +423,98 @@ export const useSwapTransaction = ({
 
       const networkDetails = mapNetworkToNetworkDetails(network);
 
-      const signedXDR = signTransaction({
-        secretKey: account.privateKey,
-        network,
-      });
+      // Aggregator swap into an asset the account has no trustline for: the
+      // built transaction is the trustline. Send it, then swap.
+      const quotedPath = useSwapStore.getState().pathResult;
+      if (quotedPath?.requiresTrustlineFirst && account.publicKey) {
+        signOrThrow(account.privateKey);
+        // An intermediate step: its hash must not reach the store, or the
+        // processing screen reports the swap as settled on the trustline.
+        // `didSubmit` stays false, so a failure here carries no volume.
+        const trustlineOutcome = await submitTransaction({
+          network,
+          isIntermediate: true,
+        });
+        if (!trustlineOutcome.hash) {
+          // submitTransaction has logged the detail.
+          throw toSubmitFailure(
+            __DEV__
+              ? trustlineOutcome.error ||
+                  "Failed to submit trustline transaction"
+              : t("swapScreen.errors.trustlineSubmitFailed"),
+            trustlineOutcome,
+          );
+        }
+        // The trustline is on chain whatever becomes of the swap, so it is
+        // reported now and not again when the swap settles.
+        trackTrustlineAdded(destinationTokenInput.tokenCode);
 
-      if (!signedXDR) {
-        // Pre-submit signing failure. Throw rather than return: the catch
-        // below is this flow's single failure path — it emits swap.failed
-        // (without volume data, since nothing reached the network) and shows
-        // the error toast, exactly as it did before volume telemetry existed.
-        const { error: signingError } = useTransactionBuilderStore.getState();
-        // The signing action failed. The user already approved at the review
-        // sheet, so this is a fault, not a decision.
-        analytics.trackInternalSignedTransactionError(signingError);
-        throw new Error(signingError || "Failed to sign transaction");
+        // The trustline exists now, so the aggregator can simulate the swap.
+        const swapPath = await requote({
+          sourceBalance: freshSource,
+          destinationBalance: freshDest,
+          sourceAmount,
+          network,
+          publicKey: account.publicKey,
+        });
+        if (
+          !swapPath ||
+          swapPath === quotedPath ||
+          swapPath.source !== SwapQuoteSource.XOXNO ||
+          !swapPath.aggregatorEnvelopeXdr
+        ) {
+          throw new Error(t("swapScreen.errors.trustlineAddedSwapUnavailable"));
+        }
+        if (
+          new BigNumber(swapPath.destinationAmount).isLessThan(
+            quotedPath.destinationAmountMin,
+          )
+        ) {
+          throw new Error(t("swapScreen.errors.trustlineAddedPriceMoved"));
+        }
+        const swapXdr = prepareAggregatorSwap({
+          envelopeXdr: swapPath.aggregatorEnvelopeXdr,
+          expectation: buildAggregatorExpectation({
+            network,
+            sender: account.publicKey,
+            sourceBalance: freshSource,
+            destinationBalance: freshDest,
+            sourceAmount,
+            pathResult: swapPath,
+          }),
+        });
+        if (!swapXdr) {
+          const { error: verifyError } = useTransactionBuilderStore.getState();
+          // prepareAggregatorSwap has logged the detail.
+          throw new Error(
+            __DEV__
+              ? verifyError || "Failed to prepare swap transaction"
+              : t("swapScreen.errors.prepareSwapFailed"),
+          );
+        }
+
+        // The review scanned the trustline transaction, not this swap, so the
+        // swap envelope gets its own scan before it is signed. Same scan call
+        // as the review; a failed scan is unable-to-scan, which proceeds as it
+        // does in the single-transaction flow.
+        const swapSecurityLevel = assessTransactionSecurity(
+          await scanSafely(swapXdr),
+        ).level;
+        const blockedKey = BLOCKED_SWAP_ERROR_KEYS[swapSecurityLevel];
+        if (blockedKey) {
+          logger.warn(
+            "SwapTransaction",
+            `Blocked the swap after the trustline: the swap transaction scan is ${swapSecurityLevel.toLowerCase()}`,
+          );
+          throw new Error(t(blockedKey));
+        }
       }
 
-      // A signature exists, so the signing action succeeded.
-      analytics.trackInternalSignedTransaction();
+      const signedXDR = signOrThrow(account.privateKey);
+      // The quoted destination amount of the transaction just signed: a
+      // trustline-first flow re-quoted in place, so the store holds its quote.
+      const signedDestinationAmount =
+        useSwapStore.getState().pathResult?.destinationAmount;
 
       // Everything the volume telemetry needs is snapshotted here — after
       // signing succeeded and immediately before submission, so the prices
@@ -306,22 +544,24 @@ export const useSwapTransaction = ({
       sourceCanonicalId = canonicalIdFromIdentity(sourceIdentity);
       destCanonicalId = canonicalIdFromIdentity(destIdentity);
 
-      // A non-held destination arrives as the `descriptorAsPathBalance` shim,
-      // which carries no `currentPrice` — the receive card's fiat line reads
-      // the prices store instead (`useSwapTokenPrices`). Fall back to that
-      // same map, keyed identically to `recordTokenId`, so the cached_display
-      // snapshot records the price the user actually saw rather than
-      // reporting the leg unpriced. Precedence matches computeDestinationFiat:
-      // the balance's own price first, then the store.
+      // The snapshot's cached_display fallback records the price the user
+      // saw. The source is a held balance: its own price, else the prices
+      // store. The destination may be a non-held shim with no `currentPrice`,
+      // so it is priced the way the receive card prices it (balance, prices
+      // store, the picker's price, the catalog's), by the same helper.
       const displayPrices =
         usePricesStore.getState().pricesByNetwork[network] ?? {};
-      const displayPriceFor = (
-        balance: PricedBalance,
-        canonicalId: TokenIdentifier,
-      ) =>
-        balance.currentPrice ??
-        displayPrices[canonicalId]?.currentPrice ??
-        null;
+      const destinationDescriptor = useSwapStore.getState().destinationToken;
+      const destinationDisplayPrice = resolveDestinationDisplayPrice({
+        balance: freshDest,
+        prices: withCatalogPrices(
+          withDescriptorPrice(displayPrices, destinationDescriptor),
+          [destinationDescriptor?.id],
+          useTokenCatalogStore.getState().byNetwork[network]?.byContractId,
+          network,
+        ),
+        descriptor: destinationDescriptor,
+      });
 
       snapshotHandle = startConfirmationPriceSnapshot({
         canonicalIds: [sourceCanonicalId, destCanonicalId],
@@ -329,10 +569,13 @@ export const useSwapTransaction = ({
         useV2: useRemoteConfigStore.getState().use_token_prices_v2,
         cachedDisplayPrices: {
           [sourceCanonicalId]: {
-            currentPrice: displayPriceFor(freshSource, sourceCanonicalId),
+            currentPrice:
+              freshSource.currentPrice ??
+              displayPrices[sourceCanonicalId]?.currentPrice ??
+              null,
           },
           [destCanonicalId]: {
-            currentPrice: displayPriceFor(freshDest, destCanonicalId),
+            currentPrice: destinationDisplayPrice ?? null,
           },
         },
       });
@@ -363,108 +606,77 @@ export const useSwapTransaction = ({
       if (!submitOutcome.hash) {
         const errorMessage =
           submitOutcome.error || "Failed to submit transaction";
-        const submitFailure = new Error(errorMessage) as Error & {
-          quoteExpiredCodes?: string[];
-          resultCodes?: SubmitResultCodes | null;
-          httpStatus?: number | null;
-          isProtocolAnswer?: boolean;
-        };
+        const submitFailure = toSubmitFailure(errorMessage, submitOutcome);
         submitFailure.quoteExpiredCodes = getQuoteExpiredOperationCodes(
           submitOutcome.resultCodes,
         );
-        submitFailure.resultCodes = submitOutcome.resultCodes;
-        submitFailure.httpStatus = submitOutcome.httpStatus;
-        submitFailure.isProtocolAnswer = submitOutcome.isProtocolAnswer;
+        // A rejected router swap is a trapped call to Horizon. Whether the
+        // router rejected it for slippage is only in the transaction's meta, so
+        // that is read (bounded) before the failure is classified; when it
+        // says so, the rejection is handled as an expired quote, like a classic
+        // swap's `op_under_dest_min`. Any doubt keeps the generic failure.
+        if (
+          !submitFailure.quoteExpiredCodes.length &&
+          (await isAggregatorSlippageRejection({
+            outcome: submitOutcome,
+            signedXDR,
+            network,
+          }))
+        ) {
+          submitFailure.quoteExpiredCodes = [ROUTER_SLIPPAGE_REASON_CODE];
+          // Put first so `pickReasonCode` reports it, not `function_trapped`.
+          submitFailure.resultCodes = {
+            ...submitOutcome.resultCodes,
+            operations: [
+              ROUTER_SLIPPAGE_REASON_CODE,
+              ...(submitOutcome.resultCodes?.operations ?? []),
+            ],
+          };
+        }
         throw submitFailure;
       }
 
-      // Settled destination amount, read from the transaction result — never
-      // the quote. Horizon's submit response carries `result_xdr`
-      // synchronously, and it reaches us on the returned outcome, so an
-      // unreadable read here is a genuine derivation failure (`error`) rather
-      // than a "not observed" case.
-      const submittedTx = TransactionBuilder.fromXdr(
-        signedXDR,
-        networkDetails.networkPassphrase,
-      );
-      const opIndex = findPathPaymentStrictSendIndex(submittedTx);
-      const settledDestAmount = submitOutcome.resultXdr
-        ? getSettledPathPaymentStrictSendAmount(
-            submitOutcome.resultXdr,
-            opIndex,
-          )
-        : null;
-
+      // Prices are frozen at the moment the swap settled, not when the
+      // settled amount has been read.
       const snapshot = snapshotHandle.resolve();
-      const sourceLeg = deriveLegUsd(
+
+      // The settled destination amount comes from the transaction itself,
+      // never the quote. Horizon's response carries the meta of a classic
+      // swap's result but not a Soroban swap's, which Stellar Expert may serve
+      // a few seconds late, so `swap.completed` is emitted by a continuation
+      // that nothing waits for: the status, balances and navigation below
+      // never sit behind that lookup.
+      reportSettledSwap({
+        outcome: submitOutcome,
+        signedXDR,
+        network,
+        destination: freshDest,
+        publicKey: account.publicKey,
+        snapshot,
         sourceAmount,
-        snapshot.pricesById?.[sourceCanonicalId]?.currentPrice,
-      );
-      const destLeg =
-        settledDestAmount !== null
-          ? deriveLegUsd(
-              settledDestAmount,
-              snapshot.pricesById?.[destCanonicalId]?.currentPrice,
-            )
-          : null;
-
-      const executionSlippagePct =
-        settledDestAmount !== null
-          ? computeExecutionSlippagePct(
-              pathResult?.destinationAmount,
-              settledDestAmount,
-            )
-          : undefined;
-      const usdSlippagePct =
-        sourceLeg.status === LegUsdStatus.OK &&
-        destLeg?.status === LegUsdStatus.OK &&
-        sourceLeg.value !== 0
-          ? computeUsdSlippagePct(sourceLeg.unrounded, destLeg.unrounded)
-          : undefined;
-
-      analytics.trackSwapSuccess({
+        sourceCanonicalId,
+        destCanonicalId,
+        sourceIdentity,
+        destIdentity,
         sourceToken: sourceBalance.tokenCode,
         destToken: destinationTokenInput.tokenCode,
-        sourceAmount,
-        destAmount: pathResult?.destinationAmount,
+        quotedDestinationAmount: signedDestinationAmount,
         allowedSlippage: freshSwapSlippage?.toString(),
-        isSwap: true,
-        volume: {
-          identity: sourceIdentity,
-          toIdentity: destIdentity,
-          amount: new BigNumber(sourceAmount || 0).toNumber(),
-          sourceLeg,
-          priceSource: snapshot.source,
-          priceFreshness: snapshot.freshness,
-          ...(pathResult?.destinationAmount
-            ? {
-                toAmountQuoted: new BigNumber(
-                  pathResult.destinationAmount,
-                ).toNumber(),
-              }
-            : {}),
-          ...(settledDestAmount !== null
-            ? { toAmount: settledDestAmount.toNumber() }
-            : {}),
-          toAmountUsdStatus: destLeg?.status ?? LegUsdStatus.ERROR,
-          ...(destLeg?.status === LegUsdStatus.OK
-            ? { toAmountUsd: destLeg.value, toAmountUsdRate: destLeg.rate }
-            : {}),
-          ...(usdSlippagePct !== undefined ? { usdSlippagePct } : {}),
-          ...(executionSlippagePct !== undefined
-            ? { executionSlippagePct }
-            : {}),
-        },
+      });
+
+      // A Soroban token bought in this swap has no trustline to add, so list it in
+      // the user's balances once the swap has settled.
+      await addBoughtTokenToBalances({
+        token: useSwapStore.getState().destinationToken,
+        publicKey: account.publicKey,
+        network,
       });
 
       // Fire SWAP_TRUSTLINE_ADDED when the combined changeTrust +
-      // pathPaymentStrictSend transaction confirmed a new trustline.
-      const { destinationToken: swappedDestination } = useSwapStore.getState();
-      if (swappedDestination?.requiresTrustline) {
-        analytics.track(AnalyticsEvent.SWAP_TRUSTLINE_ADDED, {
-          asset_code: destinationTokenInput.tokenCode,
-          asset_issuer: swappedDestination.issuer ?? "",
-        });
+      // pathPaymentStrictSend transaction confirmed a new trustline. A
+      // trustline sent ahead of the swap reported itself when it landed.
+      if (!quotedPath?.requiresTrustlineFirst) {
+        trackTrustlineAdded(destinationTokenInput.tokenCode);
       }
     } catch (error) {
       setIsProcessing(false);
@@ -473,23 +685,12 @@ export const useSwapTransaction = ({
       // breadcrumb, everything else → logger.error). Re-logging here
       // would either duplicate Sentry events or pollute breadcrumbs.
 
-      const quoteExpiredCodes =
-        error instanceof Error
-          ? (error as Error & { quoteExpiredCodes?: string[] })
-              .quoteExpiredCodes
-          : undefined;
-      const isQuoteExpired = !!quoteExpiredCodes?.length;
-
       // Carried on the thrown error, off this attempt's own submit outcome —
       // not read back from the store, which a mid-submit Close resets.
       const submitFailure =
-        error instanceof Error
-          ? (error as Error & {
-              resultCodes?: SubmitResultCodes | null;
-              httpStatus?: number | null;
-              isProtocolAnswer?: boolean;
-            })
-          : undefined;
+        error instanceof Error ? (error as SubmitFailure) : undefined;
+      const quoteExpiredCodes = submitFailure?.quoteExpiredCodes;
+      const isQuoteExpired = !!quoteExpiredCodes?.length;
       const submitResultCodes = submitFailure?.resultCodes ?? undefined;
 
       // A pre-submission failure (signing, or a throw before submit) still
@@ -569,13 +770,13 @@ export const useSwapTransaction = ({
         if (latestSource && latestDest && account.publicKey) {
           // Fire-and-forget: findSwapPath updates the store and handles its own
           // errors (matches how useSwapPathFinding invokes it).
-          useSwapStore.getState().findSwapPath({
+          requote({
             sourceBalance: latestSource,
             destinationBalance: latestDest,
             sourceAmount,
-            slippage: useSwapSettingsStore.getState().swapSlippage,
             network,
             publicKey: account.publicKey,
+            silent: false,
           });
         }
 
@@ -618,7 +819,9 @@ export const useSwapTransaction = ({
     sourceAmount,
     pathResult?.destinationAmount,
     signTransaction,
+    prepareAggregatorSwap,
     network,
+    scanSafely,
     submitTransaction,
     t,
     showToast,

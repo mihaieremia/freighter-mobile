@@ -72,11 +72,13 @@ const SwapReviewBottomSheet: React.FC<SwapReviewBottomSheetProps> = ({
     useRef<BottomSheetModal>(null);
   const trustlineInfoRef = useRef<BottomSheetModal>(null);
 
-  // The fee row mirrors the settings sheet: the inclusion fee the user set.
-  // Swaps are classic, so the info icon opens the fee info sheet (not a breakdown).
-  const inclusionFeeXlm = sorobanInclusionFeeXlm ?? swapFee;
+  // A classic swap shows the fee the user set and its info icon opens the fee
+  // info sheet. An aggregator swap is a Soroban transaction: the fee row shows the
+  // full fee of the transaction to sign and the icon opens the breakdown.
+  const isAggregatorTransaction = Boolean(pathResult?.networkFeeXlm);
+  const feeXlm = pathResult?.networkFeeXlm ?? sorobanInclusionFeeXlm ?? swapFee;
   const { openFeeDetails, feeDetailsSheets } = useFeeDetailsBottomSheet({
-    isSorobanContext: false,
+    isSorobanContext: isAggregatorTransaction,
   });
 
   const handleOpenTransactionDetails = () => {
@@ -173,9 +175,12 @@ const SwapReviewBottomSheet: React.FC<SwapReviewBottomSheetProps> = ({
         <Banner
           className="mt-[16px]"
           variant="highlight"
-          text={t("swapScreen.trustlineBanner", {
-            tokenCode: destinationTokenDescriptor.tokenCode,
-          })}
+          text={t(
+            pathResult?.requiresTrustlineFirst
+              ? "swapScreen.trustlineTwoStepBanner"
+              : "swapScreen.trustlineBanner",
+            { tokenCode: destinationTokenDescriptor.tokenCode },
+          )}
           onPress={() => trustlineInfoRef.current?.present()}
         />
       )}
@@ -252,7 +257,7 @@ const SwapReviewBottomSheet: React.FC<SwapReviewBottomSheetProps> = ({
                   <Icon.InfoCircle themeColor="gray" size={16} />
                 </TouchableOpacity>
                 <Text md medium>
-                  {formatTokenForDisplay(inclusionFeeXlm, NATIVE_TOKEN_CODE)}
+                  {formatTokenForDisplay(feeXlm, NATIVE_TOKEN_CODE)}
                 </Text>
               </View>
             ),

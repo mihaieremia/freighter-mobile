@@ -17,6 +17,7 @@ import { HistoryItemData } from "components/screens/HistoryScreen/types";
 import { NetworkDetails, NETWORKS } from "config/constants";
 import { logger } from "config/logger";
 import { BalanceMap } from "config/types";
+import { toAggregatorSwapOperation } from "helpers/aggregatorSwapHistory";
 import { processAssetBalanceChanges } from "helpers/assetBalanceChanges";
 import { formatTransactionDate } from "helpers/date";
 import { getAttrsFromSorobanHorizonOp } from "helpers/soroban";
@@ -150,6 +151,26 @@ export const mapHistoryItemData = async ({
       operation,
       networkDetails,
     );
+
+    const swapOperation = await toAggregatorSwapOperation({
+      operation,
+      publicKey,
+      networkDetails,
+      assetDiffs,
+    });
+
+    if (swapOperation) {
+      return mapSwapHistoryItem({
+        operation: swapOperation,
+        stellarExpertUrl,
+        date,
+        fee,
+        memo,
+        network: networkDetails.network,
+        themeColors,
+        xdr,
+      });
+    }
 
     return mapSorobanHistoryItem({
       operation,

@@ -7,12 +7,24 @@ import {
 import { logger } from "config/logger";
 import { PricedBalance } from "config/types";
 import { useDebugStore } from "ducks/debug";
-import { stroopToXlm } from "helpers/formatAmount";
+import {
+  AggregatorSwapExpectation,
+  verifyAggregatorSwap,
+} from "helpers/aggregatorSwap";
+import {
+  getPerOperationBaseFeeStroops,
+  stroopToXlm,
+} from "helpers/formatAmount";
 import { isContractId } from "helpers/soroban";
 import { isMuxedAccount } from "helpers/stellar";
 import { t } from "i18next";
 import { SimulationTransactionType } from "services/analytics/types";
-import { isHorizonError, signTransaction, submitTx } from "services/stellar";
+import {
+  buildChangeTrustTx,
+  isHorizonError,
+  signTransaction,
+  submitTx,
+} from "services/stellar";
 import {
   buildPaymentTransaction,
   buildSendCollectibleTransaction,
@@ -61,6 +73,11 @@ export interface SubmitTransactionOutcome {
   hash: string | null;
   /** Horizon `result_xdr` from a successful submit. */
   resultXdr: string | null;
+  /**
+   * Horizon `result_meta_xdr` from a successful submit, when the response
+   * carries it. A Soroban transaction's contract events live here.
+   */
+  resultMetaXdr: string | null;
   /** Error message when the submit failed. */
   error: string | null;
   /** Horizon `result_codes` from a 4xx protocol rejection. */
@@ -74,6 +91,7 @@ export interface SubmitTransactionOutcome {
 const FAILED_SUBMIT_OUTCOME: SubmitTransactionOutcome = {
   hash: null,
   resultXdr: null,
+  resultMetaXdr: null,
   error: null,
   resultCodes: null,
   httpStatus: null,
@@ -124,6 +142,26 @@ interface TransactionBuilderState {
     includeTrustline?: { tokenCode: string; issuer: string };
   }) => Promise<string | null>;
 
+  /** Builds a transaction that only opens a trustline (the first step of an aggregator swap into a new asset). */
+  buildTrustlineTransaction: (params: {
+    tokenCode: string;
+    issuer: string;
+    transactionFee: string;
+    transactionTimeout: number;
+    network: NETWORKS;
+    senderAddress: string;
+  }) => Promise<string | null>;
+
+  /**
+   * Verifies an unsigned aggregator swap transaction and makes it the one to
+   * sign. Returns null, and sets `error`, if the transaction is not exactly the
+   * swap that was asked for.
+   */
+  prepareAggregatorSwap: (params: {
+    envelopeXdr: string;
+    expectation: AggregatorSwapExpectation;
+  }) => string | null;
+
   buildSendCollectibleTransaction: (params: {
     collectionAddress: string;
     destinationAccount: string;
@@ -142,6 +180,13 @@ interface TransactionBuilderState {
 
   submitTransaction: (params: {
     network: NETWORKS;
+    /**
+     * A step that is not the flow's own transaction (the trustline sent ahead
+     * of an aggregator swap). Its hash is returned on the outcome but never
+     * published to the store, so a screen watching `transactionHash` does not
+     * report the flow as settled.
+     */
+    isIntermediate?: boolean;
   }) => Promise<SubmitTransactionOutcome>;
 
   resetTransaction: () => void;
@@ -151,6 +196,8 @@ const initialState: Omit<
   TransactionBuilderState,
   | "buildTransaction"
   | "buildSwapTransaction"
+  | "buildTrustlineTransaction"
+  | "prepareAggregatorSwap"
   | "buildSendCollectibleTransaction"
   | "signTransaction"
   | "submitTransaction"
@@ -410,6 +457,106 @@ export const useTransactionBuilderStore = create<TransactionBuilderState>(
       }
     },
 
+    buildTrustlineTransaction: async ({
+      tokenCode,
+      issuer,
+      transactionFee,
+      transactionTimeout,
+      network,
+      senderAddress,
+    }) => {
+      const newRequestId = createRequestId();
+
+      set({
+        isBuilding: true,
+        error: null,
+        requestId: newRequestId,
+        isSoroban: false,
+        sorobanResourceFeeXlm: null,
+        sorobanInclusionFeeXlm: null,
+      });
+
+      try {
+        const trustlineXdr = await buildChangeTrustTx({
+          network,
+          publicKey: senderAddress,
+          tokenIdentifier: `${tokenCode}:${issuer}`,
+          fee: getPerOperationBaseFeeStroops(transactionFee, 1),
+          timeoutSeconds: transactionTimeout,
+        });
+
+        if (get().requestId === newRequestId) {
+          set({
+            transactionXDR: trustlineXdr,
+            isBuilding: false,
+            signedTransactionXDR: null,
+            transactionHash: null,
+          });
+        }
+
+        return trustlineXdr;
+      } catch (error) {
+        logger.error(
+          "TransactionBuilderStore",
+          "Failed to build trustline transaction",
+          error,
+        );
+
+        if (get().requestId === newRequestId) {
+          set({
+            error: `Failed to build trustline transaction: ${extractErrorMessage(error)}`,
+            isBuilding: false,
+            transactionXDR: null,
+          });
+        }
+
+        return null;
+      }
+    },
+
+    prepareAggregatorSwap: ({ envelopeXdr, expectation }) => {
+      const newRequestId = createRequestId();
+
+      try {
+        const verified = verifyAggregatorSwap(envelopeXdr, expectation);
+        const { resourceFeeStroops } = verified;
+        const inclusionFeeStroops = verified.feeStroops - resourceFeeStroops;
+
+        set({
+          transactionXDR: envelopeXdr,
+          isBuilding: false,
+          error: null,
+          requestId: newRequestId,
+          signedTransactionXDR: null,
+          transactionHash: null,
+          isSoroban: true,
+          sorobanResourceFeeXlm: stroopToXlm(
+            new BigNumber(resourceFeeStroops.toString()),
+          ).toFixed(7),
+          sorobanInclusionFeeXlm: stroopToXlm(
+            new BigNumber(inclusionFeeStroops.toString()),
+          ).toFixed(7),
+        });
+
+        return envelopeXdr;
+      } catch (error) {
+        logger.error(
+          "TransactionBuilderStore",
+          "Aggregator swap transaction rejected",
+          error,
+        );
+
+        set({
+          error: extractErrorMessage(error),
+          isBuilding: false,
+          transactionXDR: null,
+          requestId: newRequestId,
+        });
+
+        return null;
+      }
+    },
+
     buildSendCollectibleTransaction: async (params) => {
       const newRequestId = createRequestId();
 
@@ -584,15 +731,20 @@ export const useTransactionBuilderStore = create<TransactionBuilderState>(
           network: params.network,
         });
 
-        const { hash, result_xdr: resultXdr } = result;
+        const {
+          hash,
+          result_xdr: resultXdr,
+          result_meta_xdr: resultMetaXdr,
+        } = result;
 
         // Only update with success if this submit is still the latest one.
         // Guards against late responses from previous submits showing wrong hash.
         if (get().requestId === currentRequestId) {
-          set({
-            transactionHash: hash,
-            isSubmitting: false,
-          });
+          set(
+            params.isIntermediate
+              ? { isSubmitting: false }
+              : { transactionHash: hash, isSubmitting: false },
+          );
         }
 
         // Returned per-attempt, not read back from the store: the writes above
@@ -602,6 +754,7 @@ export const useTransactionBuilderStore = create<TransactionBuilderState>(
           ...FAILED_SUBMIT_OUTCOME,
           hash,
           resultXdr: resultXdr ?? null,
+          resultMetaXdr: resultMetaXdr ?? null,
         };
       } catch (error) {
         const errorMessage = extractErrorMessage(error);
@@ -691,6 +844,7 @@ export const useTransactionBuilderStore = create<TransactionBuilderState>(
         return {
           hash: null,
           resultXdr: null,
+          resultMetaXdr: null,
           error: errorMessage,
           resultCodes:
             (horizon4xxResultCodes as SubmitResultCodes | undefined) ?? null,

@@ -12,14 +12,23 @@ import {
 import { useBalancesStore } from "ducks/balances";
 import { usePricesStore } from "ducks/prices";
 import { useRemoteConfigStore } from "ducks/remoteConfig";
+import { useTokenCatalogStore } from "ducks/tokenCatalog";
 import { fetchBalances } from "services/backend";
 import { dataStorage } from "services/storage/storageFactory";
 
 import { benignTokenScan } from "../../__mocks__/blockaid-response";
+import {
+  CATALOG_SOROBAN_CONTRACT,
+  CATALOG_USDC_ISSUER,
+  catalogSoroban,
+  catalogUsdc,
+  seedCatalog,
+} from "../../__mocks__/tokenCatalog";
 
 // Mock the fetchBalances service and usePricesStore
 jest.mock("services/backend", () => ({
   fetchBalances: jest.fn(),
+  fetchTokenCatalog: jest.fn().mockResolvedValue([]),
 }));
 
 jest.mock("services/storage/storageFactory", () => ({
@@ -96,7 +105,7 @@ describe("balances duck", () => {
     token: {
       code: "USDC",
       issuer: {
-        key: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        key: CATALOG_USDC_ISSUER,
       },
       type: "credit_alphanum4" as TokenTypeWithCustomToken,
     },
@@ -110,8 +119,7 @@ describe("balances duck", () => {
 
   const mockBalances = {
     XLM: mockNativeBalance,
-    "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN":
-      mockTokenBalance,
+    [`USDC:${CATALOG_USDC_ISSUER}`]: mockTokenBalance,
   };
 
   const mockPrices = {
@@ -119,7 +127,7 @@ describe("balances duck", () => {
       currentPrice: new BigNumber("0.5"),
       percentagePriceChange24h: new BigNumber("0.02"),
     },
-    "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN": {
+    [`USDC:${CATALOG_USDC_ISSUER}`]: {
       currentPrice: new BigNumber("1"),
       percentagePriceChange24h: new BigNumber("-0.01"),
     },
@@ -474,6 +482,87 @@ describe("balances duck", () => {
       );
     });
 
+    describe("token catalog price fallback", () => {
+      const sorobanId = `XAUM:${CATALOG_SOROBAN_CONTRACT}`;
+      const sorobanBalance = {
+        token: {
+          code: "XAUM",
+          issuer: { key: CATALOG_SOROBAN_CONTRACT },
+          type: TokenTypeWithCustomToken.CUSTOM_TOKEN,
+        },
+        total: new BigNumber("2000000000"),
+        available: new BigNumber("2000000000"),
+        contractId: CATALOG_SOROBAN_CONTRACT,
+        name: "Matrixdock Gold",
+        symbol: "XAUM",
+        decimals: 9,
+      };
+      const usdcId = `USDC:${CATALOG_USDC_ISSUER}`;
+
+      beforeEach(() => {
+        seedCatalog(NETWORKS.PUBLIC, catalogUsdc, catalogSoroban);
+      });
+
+      afterEach(() => {
+        useTokenCatalogStore.setState({ byNetwork: {} });
+      });
+
+      it("fills a held token the price fetch left unpriced, and keeps existing prices", async () => {
+        mockFetchBalances.mockResolvedValueOnce({
+          balances: { ...mockBalances, [sorobanId]: sorobanBalance },
+        } as never);
+        (usePricesStore.getState as jest.Mock).mockReturnValue(
+          createMockPricesStore({ prices: mockPrices }),
+        );
+
+        await useBalancesStore
+          .getState()
+          .fetchAccountBalances(mockParamsPubnet);
+
+        const { pricedBalances } = useBalancesStore.getState();
+        expect(pricedBalances[sorobanId].currentPrice?.toString()).toBe("4200");
+        expect(pricedBalances[sorobanId].fiatTotal?.toString()).toBe("8400");
+        // The price fetch's USDC price (1) wins over the catalog's.
+        expect(pricedBalances[usdcId].currentPrice).toEqual(
+          mockPrices[usdcId].currentPrice,
+        );
+        expect(pricedBalances[usdcId].fiatTotal?.toString()).toBe("200");
+      });
+
+      it("fills the price when the price fetch failed outright", async () => {
+        mockFetchBalances.mockResolvedValueOnce({
+          balances: { [sorobanId]: sorobanBalance },
+        } as never);
+        (usePricesStore.getState as jest.Mock).mockReturnValue(
+          createMockPricesStore({ error: "Failed to fetch token prices" }),
+        );
+
+        await useBalancesStore
+          .getState()
+          .fetchAccountBalances(mockParamsPubnet);
+
+        expect(
+          useBalancesStore.getState().pricedBalances[sorobanId].fiatTotal,
+        ).toEqual(new BigNumber("8400"));
+      });
+
+      it("does not price tokens on a network without fiat", async () => {
+        seedCatalog(NETWORKS.TESTNET, catalogUsdc, catalogSoroban);
+        mockFetchBalances.mockResolvedValueOnce({
+          balances: { [sorobanId]: sorobanBalance },
+        } as never);
+        (usePricesStore.getState as jest.Mock).mockReturnValue(
+          createMockPricesStore({}),
+        );
+
+        await useBalancesStore.getState().fetchAccountBalances(mockParams);
+
+        expect(
+          useBalancesStore.getState().pricedBalances[sorobanId].currentPrice,
+        ).toBeUndefined();
+      });
+    });
+
     it("should extract scanResults from backend balance data", async () => {
       mockFetchBalances.mockResolvedValueOnce({ balances: mockBalances });
       (usePricesStore.getState as jest.Mock).mockReturnValue(
@@ -488,8 +577,7 @@ describe("balances duck", () => {
 
       // Should extract scan results from blockaidData in balances
       expect(result.current.scanResults).toEqual({
-        "USDC-GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN":
-          benignTokenScan,
+        [`USDC-${CATALOG_USDC_ISSUER}`]: benignTokenScan,
       });
       unmount();
     });
@@ -497,8 +585,7 @@ describe("balances duck", () => {
     it("should extract scan results only from mainnet balances", async () => {
       const mockBalancesWithBlockaid = {
         ...mockBalances,
-        "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN":
-          mockTokenBalance,
+        [`USDC:${CATALOG_USDC_ISSUER}`]: mockTokenBalance,
       };
 
       mockFetchBalances.mockResolvedValueOnce({
@@ -584,15 +671,13 @@ describe("balances duck", () => {
   });
 
   describe("extractScanResultsFromBalances (via fetchAccountBalances)", () => {
-    const ISSUER = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
-
     // Stellar classic asset codes are case-sensitive alphanumeric, so a
     // lowercase code is legal and can contain "lp" as a substring (e.g.
     // "help") without being a liquidity pool.
     const helpBalance: ClassicBalance = {
       token: {
         code: "help",
-        issuer: { key: ISSUER },
+        issuer: { key: CATALOG_USDC_ISSUER },
         type: "credit_alphanum4" as TokenTypeWithCustomToken,
       },
       total: new BigNumber("10"),
@@ -618,7 +703,7 @@ describe("balances duck", () => {
       mockFetchBalances.mockResolvedValue({
         balances: {
           XLM: mockNativeBalance,
-          [`help:${ISSUER}`]: helpBalance,
+          [`help:${CATALOG_USDC_ISSUER}`]: helpBalance,
           "4ac86c65b9f7b175ae0493da0d36cc5bc88b72677ca69fce8fe374233983d8e7:lp":
             lpBalance,
         } as BalanceMap,
@@ -630,7 +715,9 @@ describe("balances duck", () => {
       await act(async () => {
         await result.current.fetchAccountBalances(mockParamsPubnet);
       });
-      expect(result.current.scanResults[`help-${ISSUER}`]).toBeDefined();
+      expect(
+        result.current.scanResults[`help-${CATALOG_USDC_ISSUER}`],
+      ).toBeDefined();
     });
 
     it("skips liquidity-pool balances and the native balance", async () => {

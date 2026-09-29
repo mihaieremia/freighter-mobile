@@ -1,9 +1,17 @@
+/* eslint-disable @fnando/consistent-import/consistent-import */
 import { fireEvent, render } from "@testing-library/react-native";
 import { BigNumber } from "bignumber.js";
 import { SwapTokenRow } from "components/screens/SwapScreen/components/SwapTokenRow";
 import { NETWORKS } from "config/constants";
 import { TokenTypeWithCustomToken } from "config/types";
+import { useTokenCatalogStore } from "ducks/tokenCatalog";
 import React from "react";
+
+import {
+  CATALOG_SOROBAN_CONTRACT,
+  catalogSoroban,
+  seedCatalog,
+} from "../../../../../__mocks__/tokenCatalog";
 
 jest.mock("hooks/useClipboard", () => ({
   useClipboard: () => ({
@@ -23,6 +31,7 @@ jest.mock("components/ContextMenuButton", () => ({
 }));
 
 jest.mock("helpers/soroban", () => ({
+  ...jest.requireActual("helpers/soroban"),
   getNativeContractDetails: () => ({ contract: "CNATIVE..." }),
   formatTokenForDisplay: (amount: string) => amount,
 }));
@@ -279,5 +288,63 @@ describe("SwapTokenRow", () => {
     // 24h% slots render "--" when their respective values are missing.
     expect(queryByText(/\$0/)).toBeNull();
     expect(getAllByText("--").length).toBeGreaterThanOrEqual(1);
+  });
+  describe("USD price on non-held rows", () => {
+    const sorobanRecord = {
+      tokenCode: "XAUM",
+      issuer: CATALOG_SOROBAN_CONTRACT,
+      isNative: false,
+      tokenType: TokenTypeWithCustomToken.CUSTOM_TOKEN,
+      hasTrustline: true,
+      domain: "",
+      name: "Matrixdock Gold",
+    } as any;
+
+    const renderNonHeld = (record: any) =>
+      render(
+        <SwapTokenRow
+          variant="non-held"
+          record={record}
+          network={NETWORKS.PUBLIC}
+          onPress={jest.fn()}
+        />,
+      );
+
+    beforeEach(() => {
+      useTokenCatalogStore.setState({ byNetwork: {} });
+    });
+
+    it("shows the record's price on the right", () => {
+      const { getByTestId } = renderNonHeld({
+        ...mockSearchRecord,
+        price: 0.5,
+      });
+
+      expect(getByTestId("non-held-price")).toHaveTextContent("$0.50");
+    });
+
+    it.each([
+      ["shows the catalog price when the record has none", {}, "$4,200.00"],
+      ["prefers the record's price over the catalog's", { price: 3 }, "$3.00"],
+    ])("%s", (_title, extra, expected) => {
+      seedCatalog(NETWORKS.PUBLIC, catalogSoroban);
+
+      const { getByTestId } = renderNonHeld({ ...sorobanRecord, ...extra });
+
+      expect(getByTestId("non-held-price")).toHaveTextContent(expected);
+    });
+
+    it.each([
+      ["neither the record nor the catalog knows one", {}],
+      ["the record's price is 0", { price: 0 }],
+    ])("shows no price when %s", (_title, extra) => {
+      const { queryByTestId, getByText } = renderNonHeld({
+        ...sorobanRecord,
+        ...extra,
+      });
+
+      expect(queryByTestId("non-held-price")).toBeNull();
+      expect(getByText("XAUM")).toBeTruthy();
+    });
   });
 });

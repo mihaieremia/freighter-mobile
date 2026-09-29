@@ -107,6 +107,8 @@ type SwapStoreState = {
   sourceAmount: string;
   sourceAmountDisplay: string;
   destinationAmount: string;
+  inputSide: "source" | "destination";
+  destinationInputAmount: string;
   pathResult: null | { destinationAmount: string };
   isLoadingPath: boolean;
   pathError: string | null;
@@ -114,6 +116,8 @@ type SwapStoreState = {
   setDestinationToken: jest.Mock;
   setSourceAmount: jest.Mock;
   setSourceAmountDisplay: jest.Mock;
+  setInputSide: jest.Mock;
+  setDestinationInputAmount: jest.Mock;
   resetSwap: jest.Mock;
 };
 
@@ -132,6 +136,8 @@ const makeDefaultSwapState = (): SwapStoreState => ({
   sourceAmount: "1",
   sourceAmountDisplay: "1",
   destinationAmount: "2",
+  inputSide: "source",
+  destinationInputAmount: "0",
   pathResult: null,
   isLoadingPath: false,
   pathError: null,
@@ -139,10 +145,13 @@ const makeDefaultSwapState = (): SwapStoreState => ({
   setDestinationToken: mockSetDestinationToken,
   setSourceAmount: mockSetSourceAmount,
   setSourceAmountDisplay: mockSetSourceAmountDisplay,
+  setInputSide: jest.fn(),
+  setDestinationInputAmount: jest.fn(),
   resetSwap: mockResetSwap,
 });
 
 jest.mock("ducks/swap", () => ({
+  SwapInputSide: jest.requireActual("ducks/swap").SwapInputSide,
   useSwapStore: jest.fn(),
   // Pass-through adapter — tests can inspect the call by passing in a
   // descriptor that doesn't match any held balance and asserting that the
@@ -172,7 +181,9 @@ const setSwapStoreState = (patch: Partial<SwapStoreState>): void => {
   const mock = useSwapStore as unknown as jest.Mock & {
     getState: () => SwapStoreState;
   };
-  mock.mockImplementation(() => state);
+  mock.mockImplementation((select?: (s: SwapStoreState) => unknown) =>
+    select ? select(state) : state,
+  );
   // The scan-stamping callback reads the destination synchronously via
   // useSwapStore.getState(), so mirror the hook-call state there too.
   mock.getState = () => state;
@@ -1109,6 +1120,46 @@ describe("SwapAmountScreen", () => {
       expect(presentedSheets.length).toBeGreaterThan(0);
     });
 
+    it("scales a Soroban source's raw balance by its decimals for MAX and the percentage buttons", async () => {
+      const XAUM = "CC2RBGYNCFBCVENIDL5BFBWPH4OUZM2UA3OD2K2N54GLMWCC4KWPVAGO";
+      const sorobanSource = {
+        id: `XAUM:${XAUM}`,
+        token: { code: "XAUM", issuer: { key: XAUM } },
+        tokenCode: "XAUM",
+        contractId: XAUM,
+        decimals: 9,
+        total: new BigNumber("1608622"),
+        available: new BigNumber("1608622"),
+      };
+      (useBalancesList as jest.Mock).mockImplementation(() => ({
+        balanceItems: [...mockBalances, sorobanSource],
+        scanResults: {},
+        isLoading: false,
+        error: null,
+        noBalances: false,
+        isRefreshing: false,
+        isFunded: true,
+        handleRefresh: jest.fn(),
+      }));
+      setSwapStoreState({ sourceTokenId: sorobanSource.id });
+
+      const { getByTestId } = renderWithProviders(
+        <SwapAmountScreen navigation={makeNavigation()} route={makeRoute()} />,
+      );
+
+      await act(async () => {
+        fireEvent.press(getByTestId("percentage-100"));
+        await Promise.resolve();
+      });
+      expect(mockSetSourceAmount).toHaveBeenLastCalledWith("0.001608622");
+
+      await act(async () => {
+        fireEvent.press(getByTestId("percentage-50"));
+        await Promise.resolve();
+      });
+      expect(mockSetSourceAmount).toHaveBeenLastCalledWith("0.000804311");
+    });
+
     it("reserves BASE_RESERVE from spendable when swapping XLM → a new token", () => {
       // total = 101.9 → xlmSpendable = 0.9. Swapping XLM → a new token
       // reserves 0.5, so the usable spendable is 0.4. An amount of 0.89
@@ -1887,6 +1938,55 @@ describe("SwapAmountScreen", () => {
           tokenIssuer: expect.any(String),
         }),
       );
+    });
+  });
+
+  describe("Receive card input", () => {
+    beforeEach(() => {
+      mockUseSwapPathFinding.mockClear();
+    });
+
+    const renderScreen = () =>
+      renderWithProviders(
+        <SwapAmountScreen navigation={makeNavigation()} route={makeRoute()} />,
+      );
+
+    const lastPathArgs = () =>
+      mockUseSwapPathFinding.mock.calls.at(-1)?.[0] as {
+        inputSide: string;
+        destinationInputAmount: string;
+        amountError: string | null;
+      };
+
+    it("finds the path for the typed receive amount", () => {
+      setSwapStoreState({
+        inputSide: "destination",
+        destinationInputAmount: "2.3",
+      });
+
+      renderScreen();
+
+      expect(lastPathArgs().inputSide).toBe("destination");
+      expect(lastPathArgs().destinationInputAmount).toBe("2.3");
+    });
+
+    it.each([
+      [
+        "stops the lookup on a balance error when the user typed the amount to sell",
+        { inputSide: "source" as const },
+        "Insufficient balance. Maximum spendable: 10 USDC",
+      ],
+      [
+        "does not let a balance error on the derived amount to sell stop the lookup that derives it",
+        { inputSide: "destination" as const, destinationInputAmount: "2.3" },
+        null,
+      ],
+    ])("%s", (_title, state, expectedAmountError) => {
+      setSwapStoreState({ ...state, sourceAmount: "999999" });
+
+      renderScreen();
+
+      expect(lastPathArgs().amountError).toBe(expectedAmountError);
     });
   });
 });

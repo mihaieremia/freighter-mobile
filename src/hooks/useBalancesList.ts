@@ -1,8 +1,15 @@
 import Blockaid from "@blockaid/client";
-import { DEFAULT_REFRESH_DELAY, NETWORKS } from "config/constants";
+import {
+  DEFAULT_REFRESH_DELAY,
+  NETWORKS,
+  mapNetworkToNetworkDetails,
+} from "config/constants";
 import { PricedBalance, TokenTypeWithCustomToken } from "config/types";
 import { useBalancesStore } from "ducks/balances";
+import { useTokenCatalogStore } from "ducks/tokenCatalog";
 import { getTokenType } from "helpers/balances";
+import { isMainnet } from "helpers/networks";
+import { fillMissingPricesFromCatalog } from "helpers/tokenCatalog";
 import { useCallback, useMemo, useState } from "react";
 
 /**
@@ -57,6 +64,23 @@ export const useBalancesList = ({
 
   const noBalances = Object.keys(pricedBalances).length === 0;
 
+  // The balances store fills catalog prices when it fetches, but the catalog can
+  // land after that fetch; filling here keeps every list on the latest catalog.
+  const catalogByContractId = useTokenCatalogStore(
+    (state) => state.byNetwork[network]?.byContractId,
+  );
+  const catalogPricedBalances = useMemo(
+    () =>
+      isMainnet(network)
+        ? fillMissingPricesFromCatalog(
+            pricedBalances,
+            catalogByContractId,
+            mapNetworkToNetworkDetails(network).networkPassphrase,
+          )
+        : pricedBalances,
+    [pricedBalances, catalogByContractId, network],
+  );
+
   const handleRefresh = useCallback(() => {
     setIsRefreshing(true);
 
@@ -102,7 +126,7 @@ export const useBalancesList = ({
   // Convert balances object to array and apply optional filtering
   const balanceItems = useMemo(
     () =>
-      Object.entries(pricedBalances)
+      Object.entries(catalogPricedBalances)
         .map(([id, balance]) => {
           const tokenType = getTokenType(id);
 
@@ -116,7 +140,7 @@ export const useBalancesList = ({
           };
         })
         .filter((item) => matchesSearchTerm(item, searchTerm ?? "")),
-    [pricedBalances, searchTerm],
+    [catalogPricedBalances, searchTerm],
   );
 
   // Only show error if we're not in the initial loading state and there is an error

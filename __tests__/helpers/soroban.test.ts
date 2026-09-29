@@ -1,4 +1,14 @@
-import { Address, Asset as SdkToken, Keypair, xdr } from "@stellar/stellar-sdk";
+import {
+  Account,
+  Address,
+  Asset as SdkToken,
+  Horizon,
+  Keypair,
+  Operation,
+  TransactionBuilder,
+  nativeToScVal,
+  xdr,
+} from "@stellar/stellar-sdk";
 import { BigNumber } from "bignumber.js";
 import { NETWORKS, TESTNET_NETWORK_DETAILS } from "config/constants";
 import {
@@ -12,6 +22,7 @@ import {
   computeTotalFeeXlm,
   getArgsForTokenInvocation,
   getContractFnArgNames,
+  getInvokedContract,
   getAuthEntryBoundAddress,
   getBalanceByKey,
   getInvocationArgs,
@@ -1015,5 +1026,78 @@ describe("getContractFnArgNames", () => {
     };
 
     expect(getContractFnArgNames(spec, "bump", 0)).toEqual([]);
+  });
+});
+
+describe("getInvokedContract", () => {
+  const network = TESTNET_NETWORK_DETAILS;
+  const SOURCE = Keypair.random().publicKey();
+  const CONTRACT = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+
+  const envelopeWith = (operation: xdr.Operation) =>
+    new TransactionBuilder(new Account(SOURCE, "1"), {
+      fee: "100",
+      networkPassphrase: network.networkPassphrase,
+    })
+      .addOperation(operation)
+      .setTimeout(0)
+      .build();
+
+  const record = (envelopeXdr?: string) =>
+    ({
+      type: "invoke_host_function",
+      transaction_attr: { envelope_xdr: envelopeXdr },
+    }) as unknown as Horizon.ServerApi.OperationRecord;
+
+  const invoke = Operation.invokeContractFunction({
+    contract: CONTRACT,
+    function: "execute_strategy",
+    args: [
+      nativeToScVal(SOURCE, { type: "address" }),
+      nativeToScVal(7, { type: "i128" }),
+    ],
+  });
+
+  it("names the contract, the function and the arguments of the first operation", () => {
+    const invoked = getInvokedContract(
+      record(envelopeWith(invoke).toXDR()),
+      network,
+    );
+
+    expect(invoked?.contractId).toBe(CONTRACT);
+    expect(invoked?.fnName).toBe("execute_strategy");
+    expect(invoked?.args).toHaveLength(2);
+  });
+
+  it("reads the inner transaction of a fee bump", () => {
+    const feeBump = TransactionBuilder.buildFeeBumpTransaction(
+      Keypair.random().publicKey(),
+      "200",
+      envelopeWith(invoke),
+      network.networkPassphrase,
+    );
+
+    expect(getInvokedContract(record(feeBump.toXDR()), network)?.fnName).toBe(
+      "execute_strategy",
+    );
+  });
+
+  it("returns null when the first operation is not a contract invocation", () => {
+    const payment = Operation.payment({
+      destination: SOURCE,
+      asset: SdkToken.native(),
+      amount: "1",
+    });
+
+    expect(
+      getInvokedContract(record(envelopeWith(payment).toXDR()), network),
+    ).toBeNull();
+  });
+
+  it.each([
+    ["no envelope", undefined],
+    ["an envelope that does not decode", "AAAA"],
+  ])("returns null for %s", (_, envelopeXdr) => {
+    expect(getInvokedContract(record(envelopeXdr), network)).toBeNull();
   });
 });

@@ -22,3 +22,12 @@ export {
   getQuoteExpiredOperationCodes,
   isQuoteExpiredResultCodes,
 } from "./quoteErrors";
+export {
+  buildAggregatorExpectation,
+  isStaleAggregatorQuote,
+} from "./swapAggregator";
+export { addBoughtTokenToBalances } from "./swapInventory";
+export {
+  isAggregatorSlippageRejection,
+  reportSettledSwap,
+} from "./swapSettlement";

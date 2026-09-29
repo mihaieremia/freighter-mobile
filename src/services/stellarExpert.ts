@@ -4,6 +4,7 @@ import { normalizeError } from "config/logger";
 import { SearchTokenResponse } from "config/types";
 import { getApiStellarExpertUrl } from "helpers/stellarExpert";
 import {
+  RetryConfig,
   createApiService,
   isRequestCanceled,
   logApiError,
@@ -17,6 +18,11 @@ const stellarExpertApiPublic = createApiService({
   baseURL: getApiStellarExpertUrl(NETWORKS.PUBLIC),
 });
 
+const apiFor = (network: NETWORKS) =>
+  network === NETWORKS.TESTNET
+    ? stellarExpertApiTestnet
+    : stellarExpertApiPublic;
+
 export const fetchTrendingAssets = async ({
   network,
   signal,
@@ -24,10 +30,7 @@ export const fetchTrendingAssets = async ({
   network: NETWORKS;
   signal?: AbortSignal;
 }) => {
-  const stellarExpertApi =
-    network === NETWORKS.TESTNET
-      ? stellarExpertApiTestnet
-      : stellarExpertApiPublic;
+  const stellarExpertApi = apiFor(network);
 
   // stellar.expert testnet always reports volume7d=0, so the
   // mainnet "sort by 7-day volume, take top 50" yields an arbitrary
@@ -71,10 +74,7 @@ export const searchToken = async (
   network: NETWORKS,
   signal?: AbortSignal,
 ) => {
-  const stellarExpertApi =
-    network === NETWORKS.TESTNET
-      ? stellarExpertApiTestnet
-      : stellarExpertApiPublic;
+  const stellarExpertApi = apiFor(network);
 
   try {
     const response = await stellarExpertApi.get<SearchTokenResponse>("/asset", {
@@ -98,6 +98,52 @@ export const searchToken = async (
       "stellarExpert",
       "Network unreachable while searching token",
       "Error searching token",
+      error,
+    );
+
+    return null;
+  }
+};
+
+const TRANSACTION_META_TIMEOUT_MS = 10000;
+
+/**
+ * Fetches the base64 `TransactionMeta` XDR of a transaction from Stellar
+ * Expert. The meta of a Soroban transaction holds its contract events, which
+ * Horizon's balance changes do not list for plain Soroban tokens.
+ *
+ * Never throws: a network failure, an unknown transaction or a malformed
+ * response returns null so the caller can fall back.
+ *
+ * @param hash - The transaction hash
+ * @param network - The network the transaction belongs to
+ * @param retry - Asks again with exponential backoff when the request fails, such as a 404 for a transaction not indexed yet
+ * @returns The base64 meta XDR, or null when it cannot be fetched
+ */
+export const fetchTransactionMeta = async (
+  hash: string,
+  network: NETWORKS,
+  retry?: RetryConfig,
+): Promise<string | null> => {
+  const stellarExpertApi = apiFor(network);
+
+  try {
+    const response = await stellarExpertApi.get<{ meta?: unknown }>(
+      `/tx/${encodeURIComponent(hash)}`,
+      { timeout: TRANSACTION_META_TIMEOUT_MS, retry },
+    );
+    const meta = response.data?.meta;
+
+    if (typeof meta !== "string" || meta.length === 0) {
+      throw normalizeError(response);
+    }
+
+    return meta;
+  } catch (error) {
+    logApiError(
+      "stellarExpert",
+      "Network unreachable while fetching transaction meta",
+      "Error fetching transaction meta",
       error,
     );
 

@@ -1,5 +1,9 @@
 import Blockaid from "@blockaid/client";
-import { NETWORKS, STORAGE_KEYS } from "config/constants";
+import {
+  NETWORKS,
+  STORAGE_KEYS,
+  mapNetworkToNetworkDetails,
+} from "config/constants";
 import { logger } from "config/logger";
 import {
   BalanceMap,
@@ -9,13 +13,16 @@ import {
 } from "config/types";
 import { usePricesStore } from "ducks/prices";
 import { useRemoteConfigStore } from "ducks/remoteConfig";
+import { useTokenCatalogStore } from "ducks/tokenCatalog";
 import { isNativeAssetId, isNativeToken } from "helpers/assetIdentity";
 import {
   getLPShareCode,
   isLiquidityPool,
   sortBalances,
 } from "helpers/balances";
+import { getBalanceDecimalTotal } from "helpers/formatAmount";
 import { isMainnet } from "helpers/networks";
+import { fillMissingPricesFromCatalog } from "helpers/tokenCatalog";
 import { ApiError, logApiError } from "services/apiFactory";
 import { fetchBalances } from "services/backend";
 import { dataStorage } from "services/storage/storageFactory";
@@ -112,7 +119,9 @@ const getExistingPricedBalances = (
       // becomes state, making the wrong value stick.
       fiatTotal:
         existingPriceData?.currentPrice &&
-        balance.total.multipliedBy(existingPriceData.currentPrice),
+        getBalanceDecimalTotal(balance).multipliedBy(
+          existingPriceData.currentPrice,
+        ),
     };
 
     // Return entry as [id, pricedBalance] tuple
@@ -144,13 +153,47 @@ const getUpdatedPricedBalances = (
         fiatCode: "USD",
         fiatTotal:
           priceData.currentPrice &&
-          updatedPricedBalances[id].total.multipliedBy(priceData.currentPrice),
+          getBalanceDecimalTotal(updatedPricedBalances[id]).multipliedBy(
+            priceData.currentPrice,
+          ),
       };
     }
   });
 
   // Sort the updated priced balances
   return sortBalances(updatedPricedBalances);
+};
+
+/** Longest a balances refresh waits for the token catalog before it goes on without it. */
+const CATALOG_WAIT_MS = 3000;
+
+/**
+ * Fills the price of held tokens the price fetch left without one from XOXNO's
+ * token catalog. The wait for the catalog is short and its failure is ignored,
+ * so the catalog can only add prices, never hold the balances back. Fiat is
+ * mainnet-only, like the price fetch.
+ */
+const fillPricesFromCatalog = async (
+  pricedBalances: PricedBalanceMap,
+  network: NETWORKS,
+): Promise<PricedBalanceMap> => {
+  if (!isMainnet(network)) return pricedBalances;
+
+  const { fetchCatalog } = useTokenCatalogStore.getState();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    fetchCatalog(network),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, CATALOG_WAIT_MS);
+    }),
+  ]);
+  clearTimeout(timer);
+
+  return fillMissingPricesFromCatalog(
+    pricedBalances,
+    useTokenCatalogStore.getState().byNetwork[network]?.byContractId,
+    mapNetworkToNetworkDetails(network).networkPassphrase,
+  );
 };
 
 /**
@@ -200,13 +243,14 @@ const fetchPricedBalances = async (
   const { pricesByNetwork, error: pricesError } = usePricesStore.getState();
   const prices = pricesByNetwork[params.network] ?? {};
 
-  if (pricesError || Object.keys(prices).length === 0) {
-    // Return existing data in case of price fetch error
-    return existingPricedBalances;
-  }
+  const pricedBalances =
+    pricesError || Object.keys(prices).length === 0
+      ? // Keep existing data in case of price fetch error
+        existingPricedBalances
+      : // Update pricedBalances with price data from the prices store
+        getUpdatedPricedBalances(existingPricedBalances, prices);
 
-  // Update pricedBalances with price data from the prices store
-  return getUpdatedPricedBalances(existingPricedBalances, prices);
+  return fillPricesFromCatalog(pricedBalances, params.network);
 };
 
 /**
@@ -316,6 +360,10 @@ export const useBalancesStore = create<BalancesState>((set, get) => ({
       if (!params.publicKey) return;
 
       set({ isLoading: true, error: null });
+
+      // Warm the token catalog (logos and prices) for the swap screens. It runs
+      // beside the balances fetch and never blocks it.
+      useTokenCatalogStore.getState().fetchCatalog(params.network);
 
       const customTokensContractsIds = await retrieveCustomTokens({
         network: params.network,

@@ -149,6 +149,28 @@ describe("SwapToScreen", () => {
     expect(getByText("Popular tokens")).toBeTruthy();
   });
 
+  it("shows the USD price on a Popular-section row when it is known, and none when it is not", () => {
+    (useSwapTokenLookupModule.useSwapTokenLookup as jest.Mock).mockReturnValue({
+      ...defaultLookupResult,
+      popularTokens: [
+        { ...mockPopularRecord, price: 2.5 },
+        {
+          ...mockPopularRecord,
+          tokenCode: "YBX",
+          issuer: "GBBD47UZQ2BNSE5O27ZIVVKV4OZVL2D7OEHTASAA5HQYKWNGZFYMHZWZ",
+        },
+      ],
+    });
+
+    const { getAllByTestId, getByText } = renderWithProviders(
+      <SwapToScreen {...mockNavProps} />,
+    );
+
+    expect(getByText("YBX")).toBeTruthy();
+    expect(getAllByTestId("non-held-price")).toHaveLength(1);
+    expect(getAllByTestId("non-held-price")[0]).toHaveTextContent("$2.50");
+  });
+
   it("uses the plural 'Your tokens' title when the held bucket has 2+ entries", () => {
     const extraHeldBalance = {
       ...mockHeldBalance,
@@ -285,7 +307,7 @@ describe("SwapToScreen", () => {
     );
 
     expect(
-      getByText(/Soroban contract tokens aren't supported for swaps yet/),
+      getByText(/This Soroban token isn't available for swaps yet/),
     ).toBeTruthy();
   });
 
@@ -372,7 +394,9 @@ describe("SwapToScreen", () => {
     // Spinner must be visible
     expect(getByTestId("search-loading-spinner")).toBeTruthy();
     // Neither the Soroban message nor the no-results message should appear
-    expect(queryByText(/Soroban contract tokens aren't supported/)).toBeNull();
+    expect(
+      queryByText(/This Soroban token isn't available for swaps/),
+    ).toBeNull();
     expect(queryByText(/No tokens match/i)).toBeNull();
     // The Results section header must not appear while still loading
     expect(queryByText("Results")).toBeNull();

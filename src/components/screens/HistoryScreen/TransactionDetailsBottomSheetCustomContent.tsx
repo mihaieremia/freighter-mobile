@@ -110,6 +110,10 @@ export const TransactionDetailsBottomSheetCustomContent: React.FC<
           transactionDetails.swapDetails?.destinationAmount ?? "0",
         )
       : "0";
+  // A swap whose received amount could not be read has no rate to show.
+  const hasSwapAmounts =
+    !!transactionDetails.swapDetails?.sourceAmount &&
+    !!transactionDetails.swapDetails?.destinationAmount;
   const formattedSwapRate = new BigNumber(swapRate).toFixed(2, 1);
   const swapRateText = `1 ${transactionDetails.swapDetails?.sourceTokenCode} ≈ ${formatTokenForDisplay(formattedSwapRate, transactionDetails.swapDetails?.destinationTokenCode ?? "")}`;
 
@@ -184,7 +188,8 @@ export const TransactionDetailsBottomSheetCustomContent: React.FC<
               ),
             }
           : undefined,
-        transactionDetails.transactionType === TransactionType.SWAP
+        transactionDetails.transactionType === TransactionType.SWAP &&
+        hasSwapAmounts
           ? {
               icon: <Icon.Divide03 size={16} themeColor="gray" />,
               titleComponent: (
@@ -235,6 +240,7 @@ export const TransactionDetailsBottomSheetCustomContent: React.FC<
       fee,
       isSuccess,
       swapRateText,
+      hasSwapAmounts,
       t,
       transactionDetails.transactionType,
       handleCopyXdr,

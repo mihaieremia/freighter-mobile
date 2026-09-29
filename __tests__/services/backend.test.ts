@@ -5,6 +5,8 @@ import { isRequestCanceled } from "services/apiFactory";
 import {
   fetchBalances,
   fetchCollectibles,
+  fetchSwapQuote,
+  fetchSwapTokens,
   fetchTokenPrices,
   freighterBackendV1,
   freighterBackendV2,
@@ -13,6 +15,10 @@ import {
   submitTransaction,
   SimulateTransactionParams,
   SubmitTransactionBody,
+  SwapListedToken,
+  SwapListedTokenKind,
+  SwapQuote,
+  SwapQuoteSource,
 } from "services/backend";
 import { scanBulkTokens } from "services/blockaid/api";
 import { dataStorage } from "services/storage/storageFactory";
@@ -1412,6 +1418,77 @@ describe("Backend Service - handleContractLookup", () => {
       isNative: false,
       domain: "",
       tokenCode: "USDC",
+    });
+  });
+});
+
+describe("Backend Service - swap routes", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  describe("fetchSwapQuote", () => {
+    const { network, ...quoteBody } = {
+      network: NETWORKS.TESTNET,
+      sourceAsset: "XLM",
+      destAsset: "USDC:GISSUER",
+      sourceAmount: "10",
+      sourceDecimals: 7,
+      destDecimals: 7,
+      sender: "GSENDER",
+      slippagePercent: 1,
+      timeoutSeconds: 180,
+    };
+    const quote: SwapQuote = {
+      source: SwapQuoteSource.XOXNO,
+      sourceAmount: "10",
+      destinationAmount: "1.2345678",
+      destinationAmountMin: "1.2",
+      destinationDecimals: 7,
+      conversionRate: "0.12345678",
+    };
+
+    it("posts the request to /swap/quote and unwraps the quote", async () => {
+      (freighterBackendV2.post as jest.Mock).mockResolvedValueOnce({
+        data: { data: quote },
+      });
+
+      await expect(fetchSwapQuote({ network, ...quoteBody })).resolves.toEqual(
+        quote,
+      );
+
+      expect(freighterBackendV2.post).toHaveBeenCalledTimes(1);
+      expect(freighterBackendV2.post).toHaveBeenCalledWith(
+        "/swap/quote",
+        quoteBody,
+        { params: { network } },
+      );
+    });
+  });
+
+  describe("fetchSwapTokens", () => {
+    const tokens: SwapListedToken[] = [
+      {
+        id: "CTOKEN",
+        kind: SwapListedTokenKind.SOROBAN,
+        code: "TKN",
+        name: "Token",
+        decimals: 7,
+        priceUsd: 1.5,
+      },
+    ];
+
+    it("gets /swap/tokens for the network and unwraps the list", async () => {
+      (freighterBackendV2.get as jest.Mock).mockResolvedValueOnce({
+        data: { data: tokens },
+      });
+
+      await expect(fetchSwapTokens(NETWORKS.PUBLIC)).resolves.toEqual(tokens);
+
+      expect(freighterBackendV2.get).toHaveBeenCalledTimes(1);
+      expect(freighterBackendV2.get).toHaveBeenCalledWith("/swap/tokens", {
+        params: { network: NETWORKS.PUBLIC },
+      });
     });
   });
 });

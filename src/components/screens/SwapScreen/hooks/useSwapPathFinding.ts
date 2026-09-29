@@ -1,6 +1,6 @@
 import { DEFAULT_DEBOUNCE_DELAY, NETWORKS } from "config/constants";
 import { TokenTypeWithCustomToken, PricedBalance } from "config/types";
-import { useSwapStore } from "ducks/swap";
+import { SwapInputSide, useSwapStore } from "ducks/swap";
 import useDebounce from "hooks/useDebounce";
 import { useEffect } from "react";
 
@@ -22,7 +22,13 @@ interface UseSwapPathFindingParams {
   sourceBalance: BalanceItem | undefined;
   destinationTokenForPath: BalanceItem | undefined;
   sourceAmount: string;
+  /** Which card the user typed in; the quote is asked for that amount. */
+  inputSide: SwapInputSide;
+  /** The amount typed in the receive card; only read when `inputSide` is `SwapInputSide.DESTINATION`. */
+  destinationInputAmount: string;
   swapSlippage: number;
+  /** How long, in seconds, an aggregator transaction stays valid. */
+  swapTimeout: number;
   network: NETWORKS;
   publicKey: string | undefined;
   amountError: string | null;
@@ -32,27 +38,38 @@ export const useSwapPathFinding = ({
   sourceBalance,
   destinationTokenForPath,
   sourceAmount,
+  inputSide,
+  destinationInputAmount,
   swapSlippage,
+  swapTimeout,
   network,
   publicKey,
   amountError,
 }: UseSwapPathFindingParams) => {
   const { findSwapPath, clearPath } = useSwapStore();
 
+  const isExactOut = inputSide === SwapInputSide.DESTINATION;
+  // The typed amount is what the quote is asked for; the other card shows what
+  // the backend derives from it, so it must not re-trigger the lookup.
+  const typedAmount = isExactOut ? destinationInputAmount : sourceAmount;
+
   const debouncedFindSwapPath = useDebounce(() => {
     if (
       sourceBalance &&
       destinationTokenForPath &&
-      sourceAmount &&
-      Number(sourceAmount) > 0 &&
+      typedAmount &&
+      Number(typedAmount) > 0 &&
       !amountError &&
       publicKey
     ) {
       findSwapPath({
         sourceBalance,
         destinationBalance: destinationTokenForPath,
-        sourceAmount,
+        ...(isExactOut
+          ? { destinationAmount: typedAmount }
+          : { sourceAmount: typedAmount }),
         slippage: swapSlippage,
+        timeoutSeconds: swapTimeout,
         network,
         publicKey,
       });
@@ -71,7 +88,8 @@ export const useSwapPathFinding = ({
   }, [
     sourceBalance?.id,
     destinationTokenForPath?.id,
-    sourceAmount,
+    typedAmount,
+    isExactOut,
     swapSlippage,
     network,
     publicKey,

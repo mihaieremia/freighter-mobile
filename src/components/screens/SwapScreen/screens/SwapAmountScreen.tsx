@@ -17,17 +17,17 @@ import {
 } from "components/screens/SwapScreen/components";
 import {
   buildDestinationPickerToken,
-  buildReceiveTexts,
   buildSellSecondaryText,
   buildSourceBalanceRight,
-  computeDestinationFiat,
   recordTokenId,
   shouldShowXlmReservePreflight,
+  withDescriptorPrice,
 } from "components/screens/SwapScreen/helpers";
 import {
   SWAP_TOAST_IDS,
   useDefaultSwapDestination,
   useSwapAmountError,
+  useSwapAmountInputs,
   useSwapBalances,
   useSwapCtaState,
   useSwapDirectionToggle,
@@ -47,22 +47,22 @@ import { Button } from "components/sds/Button";
 import Icon from "components/sds/Icon";
 import { Text } from "components/sds/Typography";
 import { AnalyticsEvent, SwapPickerEntrypoint } from "config/analyticsConfig";
-import {
-  BASE_RESERVE,
-  DEFAULT_DECIMALS,
-  TransactionContext,
-} from "config/constants";
+import { BASE_RESERVE, TransactionContext } from "config/constants";
 import { logger } from "config/logger";
 import { SWAP_ROUTES, SwapStackParamList } from "config/routes";
 import { FormattedSearchTokenRecord } from "config/types";
 import { useAuthenticationStore } from "ducks/auth";
 import { useDebugStore } from "ducks/debug";
-import { descriptorAsPathBalance, useSwapStore } from "ducks/swap";
+import {
+  SwapInputSide,
+  descriptorAsPathBalance,
+  useSwapStore,
+} from "ducks/swap";
 import { useSwapSettingsStore } from "ducks/swapSettings";
 import { useTransactionBuilderStore } from "ducks/transactionBuilder";
 import { isNativeAssetId } from "helpers/assetIdentity";
 import { calculateSpendableAmount } from "helpers/balances";
-import { formatFiatAmount } from "helpers/formatAmount";
+import { getBalanceDecimals, toDecimalAmount } from "helpers/formatAmount";
 import { waitForKeyboardDismiss } from "helpers/keyboard";
 import useAppTranslation from "hooks/useAppTranslation";
 import { type HeldBalanceItem, useBalancesList } from "hooks/useBalancesList";
@@ -71,6 +71,7 @@ import useGetActiveAccount from "hooks/useGetActiveAccount";
 import { useInitialRecommendedFee } from "hooks/useInitialRecommendedFee";
 import { clearNetworkFeesCache, useNetworkFees } from "hooks/useNetworkFees";
 import { useTokenFiatConverter } from "hooks/useTokenFiatConverter";
+import { useWithCatalogPrices } from "hooks/useWithCatalogPrices";
 import { useToast } from "providers/ToastProvider";
 import React, {
   useEffect,
@@ -108,7 +109,8 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
   const headerHeight = useHeaderHeight();
   const { account } = useGetActiveAccount();
   const { network } = useAuthenticationStore();
-  const { swapFee, swapSlippage, resetToDefaults } = useSwapSettingsStore();
+  const { swapFee, swapSlippage, swapTimeout, resetToDefaults } =
+    useSwapSettingsStore();
   const { overriddenBlockaidResponse } = useDebugStore();
   const { isBuilding, resetTransaction } = useTransactionBuilderStore();
   const { transactionXDR, transactionHash } = useTransactionBuilderStore();
@@ -141,13 +143,13 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
     sourceTokenSymbol,
     sourceAmount,
     destinationAmount,
+    inputSide,
+    destinationInputAmount,
     pathResult,
     isLoadingPath,
     pathError,
     setSourceToken,
     setDestinationToken,
-    setSourceAmount,
-    setSourceAmountDisplay,
     resetSwap,
   } = useSwapStore();
 
@@ -161,11 +163,14 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
   const spendableAmount = useMemo(() => {
     if (!sourceBalance || !account) return null;
 
-    const baseSpendable = calculateSpendableAmount({
-      balance: sourceBalance,
-      subentryCount: account.subentryCount || 0,
-      transactionFee: swapFee,
-    });
+    const baseSpendable = toDecimalAmount(
+      sourceBalance,
+      calculateSpendableAmount({
+        balance: sourceBalance,
+        subentryCount: account.subentryCount || 0,
+        transactionFee: swapFee,
+      }),
+    );
 
     // Swapping XLM → a new token locks BASE_RESERVE (0.5 XLM) for the new
     // trustline, so that XLM isn't actually spendable. Reserve it up-front
@@ -189,30 +194,11 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
   ]);
 
   // Token/fiat amount input is driven by the system keyboard via TextInput.
-  // We mirror the converter's tokenAmount back into the swap store so that
-  // the existing path-finding effect (keyed on sourceAmount) still fires.
+  // useSwapAmountInputs (below) mirrors it into the swap store, and mirrors the
+  // quote's derived amount into the receive card.
   const converter = useTokenFiatConverter({ selectedBalance: sourceBalance });
-  const {
-    tokenAmount,
-    tokenAmountDisplay,
-    fiatAmountDisplay,
-    showFiatAmount,
-    setTokenAmount,
-    updateFiatDisplay,
-  } = converter;
-
-  // Sync the converter's token amount back into the swap store. The store's
-  // sourceAmount stays the single source of truth for path-finding so
-  // useSwapPathFinding can keep its existing dependency list.
-  useEffect(() => {
-    setSourceAmount(tokenAmount);
-    setSourceAmountDisplay(tokenAmountDisplay);
-  }, [
-    tokenAmount,
-    tokenAmountDisplay,
-    setSourceAmount,
-    setSourceAmountDisplay,
-  ]);
+  const { tokenAmount, fiatAmountDisplay, showFiatAmount, updateFiatDisplay } =
+    converter;
 
   const { amountError, setActiveError } = useSwapAmountError({
     sourceBalance,
@@ -247,10 +233,15 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
     sourceBalance,
     destinationTokenForPath: destinationForPath,
     sourceAmount,
+    inputSide,
+    destinationInputAmount,
     swapSlippage,
+    swapTimeout,
     network,
     publicKey: account?.publicKey,
-    amountError,
+    // A wanted output is sized by its quote, so the amount to sell can only be
+    // checked against the balance once the quote is back.
+    amountError: inputSide === SwapInputSide.SOURCE ? amountError : null,
   });
 
   const {
@@ -312,6 +303,21 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
     extraTokenIds: extraPriceIds,
   });
 
+  const {
+    sellCardConverter,
+    receiveCardConverter,
+    setSellTokenAmount,
+    hasReceivePrice,
+    receiveSecondaryText,
+  } = useSwapAmountInputs({
+    sellConverter: converter,
+    sourceBalance,
+    destinationForPath,
+    destinationBalance,
+    destinationTokenDescriptor,
+    prices,
+  });
+
   // Pull-to-refresh state for the Trending list. On failure, surface a
   // toast so the user knows the cached list they're seeing is stale; on
   // success, the SWR refresh swaps the data in silently.
@@ -359,6 +365,22 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
     setDestinationToken,
   });
 
+  // The detail sheet prices its token from the prices map, then the record's own
+  // price, then the XOXNO catalog's.
+  const trendingId = selectedTrendingRecord
+    ? recordTokenId(selectedTrendingRecord)
+    : undefined;
+  const trendingPrices = useWithCatalogPrices(
+    withDescriptorPrice(
+      prices,
+      trendingId
+        ? { id: trendingId, priceUsd: selectedTrendingRecord?.price }
+        : undefined,
+    ),
+    [trendingId],
+  );
+  const trendingPrice = trendingId ? trendingPrices[trendingId] : undefined;
+
   // Scroll the amount screen back to the top whenever the selected source or
   // destination token changes — after picking from the Swap-from / Swap-to
   // pickers, the trending detail sheet, or the XLM-reserve swap — so the
@@ -371,6 +393,8 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
     sourceBalance,
     destinationTokenDescriptor,
     sourceAmount,
+    inputSide,
+    destinationInputAmount,
     spendableAmount,
     isLoadingPath,
     isBuilding: isBuilding || isOpeningReviewSheet,
@@ -483,18 +507,22 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
           const finalFiat = finalToken.multipliedBy(tokenPrice).toFixed(2);
 
           updateFiatDisplay(finalFiat);
-          setTokenAmount(finalToken.toFixed(DEFAULT_DECIMALS));
+          setSellTokenAmount(
+            finalToken.toFixed(getBalanceDecimals(sourceBalance)),
+          );
           return;
         }
       }
 
-      setTokenAmount(targetAmount.toFixed(DEFAULT_DECIMALS));
+      setSellTokenAmount(
+        targetAmount.toFixed(getBalanceDecimals(sourceBalance)),
+      );
     },
     [
       spendableAmount,
       showFiatAmount,
       sourceBalance,
-      setTokenAmount,
+      setSellTokenAmount,
       updateFiatDisplay,
     ],
   );
@@ -512,7 +540,7 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
     swapFee,
     setSourceToken,
     setDestinationToken,
-    setTokenAmount,
+    setTokenAmount: setSellTokenAmount,
   });
 
   // Swap source ↔ destination via the chevron-down button between the
@@ -525,41 +553,8 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
     destinationTokenDescriptor,
     setSourceToken,
     setDestinationToken,
-    setTokenAmount,
+    setTokenAmount: setSellTokenAmount,
   });
-
-  const destinationFiat = useMemo(
-    () =>
-      computeDestinationFiat({
-        destinationAmount,
-        destinationBalance,
-        destinationTokenDescriptor,
-        prices,
-      }),
-    [destinationAmount, destinationBalance, destinationTokenDescriptor, prices],
-  );
-
-  // Held balance carries currentPrice when /token-prices has it;
-  // non-held destinations rely on the prices map keyed on
-  // "<code>:<issuer>" (or NATIVE_TOKEN_CODE for XLM). Used to keep the
-  // receive-card fiat at "$0.00" instead of "--" while the user hasn't
-  // typed an amount yet — "--" should be reserved for tokens we
-  // genuinely don't have a price for.
-  const hasDestinationPrice = useMemo(() => {
-    if (
-      destinationBalance?.currentPrice &&
-      !destinationBalance.currentPrice.isZero()
-    ) {
-      return true;
-    }
-    if (destinationTokenDescriptor) {
-      const tokenId = destinationTokenDescriptor.issuer
-        ? `${destinationTokenDescriptor.tokenCode}:${destinationTokenDescriptor.issuer}`
-        : destinationTokenDescriptor.tokenCode;
-      return !!prices[tokenId]?.currentPrice;
-    }
-    return false;
-  }, [destinationBalance, destinationTokenDescriptor, prices]);
 
   const {
     transactionSecurityAssessment,
@@ -812,13 +807,6 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
     destinationBalance,
     destinationTokenDescriptor,
   });
-  const { receiveBigText, receiveSmallText } = buildReceiveTexts({
-    showFiatAmount,
-    destinationAmount,
-    destinationFiat,
-    hasDestinationPrice,
-    destinationTokenLabel,
-  });
   const sourceBalanceRight = buildSourceBalanceRight({
     sourceBalance,
     sourceTokenSymbol,
@@ -848,7 +836,7 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
         accessibilityLabel={t("swapScreen.cta.enterAmount")}
         accessibilityHint={t("swapScreen.title")}
         availableBalanceText={sourceBalanceRight || null}
-        converter={converter}
+        converter={sellCardConverter}
         hasUsdPrice={
           !!sourceBalance?.currentPrice && !sourceBalance.currentPrice.isZero()
         }
@@ -871,7 +859,7 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
 
       {/* Receive card */}
       <AmountCard
-        mode="readonly"
+        mode="editable"
         testID="swap-receive-card"
         label={t("swapScreen.youReceive")}
         selectedToken={destinationPickerToken}
@@ -893,11 +881,13 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
             ? "swap-receive-pill"
             : "swap-receive-choose-pill"
         }
-        primaryAmount={destinationTokenDescriptor ? receiveBigText : "0"}
-        secondaryAmount={
-          destinationTokenDescriptor ? receiveSmallText : formatFiatAmount("0")
-        }
-        placeholderActive={!destinationTokenDescriptor}
+        inputTestID="swap-receive-amount-input"
+        focusTriggerTestID="swap-receive-amount-focus-trigger"
+        fiatToggleTestID="swap-receive-amount-fiat-toggle"
+        accessibilityLabel={t("swapScreen.youReceive")}
+        converter={receiveCardConverter}
+        hasUsdPrice={hasReceivePrice}
+        secondaryAmountText={receiveSecondaryText}
       />
 
       <View className="items-center mt-[24px]">
@@ -1109,18 +1099,11 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
           customContent={
             <TrendingTokenDetailBottomSheet
               record={selectedTrendingRecord}
-              priceInfo={(() => {
-                const p = prices[recordTokenId(selectedTrendingRecord)];
-                const fallbackPrice =
-                  selectedTrendingRecord.price !== undefined
-                    ? new BigNumber(selectedTrendingRecord.price)
-                    : undefined;
-                return {
-                  currentPrice: p?.currentPrice ?? fallbackPrice,
-                  percentagePriceChange24h:
-                    p?.percentagePriceChange24h ?? undefined,
-                };
-              })()}
+              priceInfo={{
+                currentPrice: trendingPrice?.currentPrice ?? undefined,
+                percentagePriceChange24h:
+                  trendingPrice?.percentagePriceChange24h ?? undefined,
+              }}
               onSwapTo={confirmTrendingSelection}
               onCancel={() => trendingDetailSheetRef.current?.dismiss()}
               onSecurityWarningPress={presentTrendingSecurityWarning}

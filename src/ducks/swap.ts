@@ -10,10 +10,19 @@ import { logger } from "config/logger";
 import { PricedBalance, TokenTypeWithCustomToken } from "config/types";
 import { useDebugStore } from "ducks/debug";
 import { isNativeAssetId } from "helpers/assetIdentity";
-import { formatBigNumberForDisplay } from "helpers/formatAmount";
-import { isContractId } from "helpers/soroban";
+import {
+  formatBigNumberForDisplay,
+  getBalanceDecimals,
+} from "helpers/formatAmount";
+import { getSorobanContractId, swapAssetId } from "helpers/swapAssets";
 import { type HeldBalanceItem } from "hooks/useBalancesList";
 import { t } from "i18next";
+import {
+  isApiError,
+  isRequestCanceled,
+  logApiError,
+} from "services/apiFactory";
+import { SwapQuote, SwapQuoteSource, fetchSwapQuote } from "services/backend";
 import { getTokenForPayment } from "services/transactionService";
 import { create } from "zustand";
 
@@ -23,6 +32,16 @@ export interface SwapPathResult {
   destinationAmountMin: string;
   path: string[];
   conversionRate: string;
+  /** The venue that quoted the route: the aggregator, or the classic DEX (`HORIZON`), whether the backend or the device lookup found it. */
+  source: SwapQuoteSource;
+  /** When the quote was taken, in ms. Aggregator transactions expire, so old quotes get refreshed. */
+  quotedAt: number;
+  /** Full fee, in XLM, of the aggregator transaction. Absent when the wallet builds the transaction. */
+  networkFeeXlm?: string;
+  /** Unsigned aggregator transaction. Absent for a classic route, or before the trustline exists. */
+  aggregatorEnvelopeXdr?: string;
+  /** The aggregator route needs the destination trustline added in a first transaction. */
+  requiresTrustlineFirst?: boolean;
 }
 
 interface HorizonPathToken {
@@ -31,11 +50,12 @@ interface HorizonPathToken {
   asset_issuer?: string;
 }
 
-interface SwapPathData {
-  sourceAmount: string;
-  destinationAmount: string;
-  path: string[];
-  conversionRate: string;
+type SwapPathData = Omit<SwapPathResult, "quotedAt">;
+
+/** The card the user last typed in; the quote is asked for that card's amount. */
+export enum SwapInputSide {
+  SOURCE = "source",
+  DESTINATION = "destination",
 }
 
 interface SwapState {
@@ -44,6 +64,14 @@ interface SwapState {
   destinationToken: DestinationTokenDescriptor | null;
   sourceAmount: string; // Internal value (dot notation)
   sourceAmountDisplay: string; // Display value (locale formatted)
+  /**
+   * Which card the user last typed in. The typed amount drives the quote and the
+   * other card shows what the backend derived from it: the amount sold
+   * (`sourceAmount`) when `SOURCE`, the amount to receive (`destinationInputAmount`)
+   * when `DESTINATION`.
+   */
+  inputSide: SwapInputSide;
+  destinationInputAmount: string; // Typed amount to receive (dot notation)
   destinationAmount: string;
   pathResult: SwapPathResult | null;
   isLoadingPath: boolean;
@@ -55,13 +83,22 @@ interface SwapState {
   setDestinationToken: (descriptor: DestinationTokenDescriptor | null) => void;
   setSourceAmount: (amount: string, preserveDisplay?: boolean) => void;
   setSourceAmountDisplay: (displayAmount: string) => void;
+  setInputSide: (side: SwapInputSide) => void;
+  setDestinationInputAmount: (amount: string) => void;
   findSwapPath: (params: {
     sourceBalance: PricedBalance;
     destinationBalance: PricedBalance;
-    sourceAmount: string;
+    /** What to sell. Exactly one of `sourceAmount` and `destinationAmount` is set. */
+    sourceAmount?: string;
+    /** What to receive; the backend sizes the amount to sell and it lands in `sourceAmount`. */
+    destinationAmount?: string;
     slippage: number;
+    /** How long, in seconds, an aggregator transaction stays valid. */
+    timeoutSeconds: number;
     network: NETWORKS;
     publicKey: string;
+    /** Refresh the quote in place: no loading state, and a failed refresh keeps the current quote. */
+    silent?: boolean;
   }) => Promise<void>;
   clearPath: () => void;
   resetSwap: () => void;
@@ -73,6 +110,8 @@ const initialState = {
   destinationToken: null as DestinationTokenDescriptor | null,
   sourceAmount: "0",
   sourceAmountDisplay: "0",
+  inputSide: SwapInputSide.SOURCE,
+  destinationInputAmount: "0",
   destinationAmount: "0",
   pathResult: null,
   isLoadingPath: false,
@@ -97,49 +136,127 @@ const findClassicSwapPath = async (params: {
   sourceBalance: PricedBalance;
   destinationBalance: PricedBalance;
   sourceAmount: string;
+  slippage: number;
   network: NETWORKS;
 }): Promise<SwapPathData | null> => {
-  const { sourceBalance, destinationBalance, sourceAmount, network } = params;
+  const { sourceBalance, destinationBalance, sourceAmount, slippage, network } =
+    params;
 
+  const networkDetails = mapNetworkToNetworkDetails(network);
+  const server = new Horizon.Server(networkDetails.networkUrl);
+
+  const sourceToken = getTokenForPayment(sourceBalance);
+  const destToken = getTokenForPayment(destinationBalance);
+
+  const pathsResult = await server
+    .strictSendPaths(sourceToken, sourceAmount, [destToken])
+    .limit(1)
+    .call();
+
+  if (pathsResult.records.length === 0) {
+    return null;
+  }
+
+  const bestPath = pathsResult.records[0];
+
+  const path: string[] = bestPath.path.map((token: HorizonPathToken) => {
+    if (isNativeAssetId(token.asset_type)) {
+      return "native";
+    }
+    return `${token.asset_code}:${token.asset_issuer}`;
+  });
+
+  const sourceAmountBN = new BigNumber(sourceAmount);
+  const destAmountBN = new BigNumber(bestPath.destination_amount);
+  const conversionRate = destAmountBN.dividedBy(sourceAmountBN).toFixed(7);
+
+  return {
+    sourceAmount,
+    destinationAmount: bestPath.destination_amount,
+    destinationAmountMin: computeDestMinWithSlippage(
+      bestPath.destination_amount,
+      slippage,
+    ),
+    path,
+    conversionRate,
+    source: SwapQuoteSource.HORIZON,
+  };
+};
+
+/**
+ * Asks the backend for the best route across the classic DEX and the XOXNO
+ * aggregator. Resolves to `null` when no route exists and to `undefined` when the
+ * backend could not answer, so the caller can fall back to the device lookup.
+ * A backend failure is logged as an error and a connectivity failure as a warning;
+ * a quote whose decimals disagree with the wallet's is logged as an error and
+ * treated as no answer.
+ */
+const findBackendSwapPath = async (params: {
+  sourceBalance: PricedBalance;
+  destinationBalance: PricedBalance;
+  sourceAmount?: string;
+  destinationAmount?: string;
+  slippage: number;
+  timeoutSeconds: number;
+  network: NETWORKS;
+  publicKey: string;
+}): Promise<SwapPathData | null | undefined> => {
+  let quote: SwapQuote;
   try {
-    const networkDetails = mapNetworkToNetworkDetails(network);
-    const server = new Horizon.Server(networkDetails.networkUrl);
-
-    const sourceToken = getTokenForPayment(sourceBalance);
-    const destToken = getTokenForPayment(destinationBalance);
-
-    const pathsResult = await server
-      .strictSendPaths(sourceToken, sourceAmount, [destToken])
-      .limit(1)
-      .call();
-
-    if (pathsResult.records.length === 0) {
+    quote = await fetchSwapQuote({
+      network: params.network,
+      sourceAsset: swapAssetId(params.sourceBalance),
+      destAsset: swapAssetId(params.destinationBalance),
+      sourceDecimals: getBalanceDecimals(params.sourceBalance),
+      destDecimals: getBalanceDecimals(params.destinationBalance),
+      sourceAmount: params.sourceAmount,
+      destAmount: params.destinationAmount,
+      sender: params.publicKey,
+      slippagePercent: params.slippage,
+      timeoutSeconds: params.timeoutSeconds,
+    });
+  } catch (error) {
+    if (isApiError(error) && error.status === 404) {
       return null;
     }
+    if (!isRequestCanceled(error)) {
+      logApiError(
+        "SwapStore",
+        "Swap quote unreachable",
+        "Swap quote request failed",
+        error,
+      );
+    }
 
-    const bestPath = pathsResult.records[0];
-
-    const path: string[] = bestPath.path.map((token: HorizonPathToken) => {
-      if (isNativeAssetId(token.asset_type)) {
-        return "native";
-      }
-      return `${token.asset_code}:${token.asset_issuer}`;
-    });
-
-    const sourceAmountBN = new BigNumber(sourceAmount);
-    const destAmountBN = new BigNumber(bestPath.destination_amount);
-    const conversionRate = destAmountBN.dividedBy(sourceAmountBN).toFixed(7);
-
-    return {
-      sourceAmount,
-      destinationAmount: bestPath.destination_amount,
-      path,
-      conversionRate,
-    };
-  } catch (error) {
-    logger.error("SwapStore", "Failed to find classic swap path", error);
-    throw error;
+    return undefined;
   }
+
+  // The amounts are shown, and the transaction is checked, with the decimals the
+  // wallet knows the token has, so a quote that disagrees is not trusted.
+  const expectedDecimals = getBalanceDecimals(params.destinationBalance);
+  if (quote.destinationDecimals !== expectedDecimals) {
+    logger.error(
+      "SwapStore",
+      "Swap quote decimals differ from the token's",
+      new Error(
+        `${swapAssetId(params.destinationBalance)}: quoted ${quote.destinationDecimals}, expected ${expectedDecimals}`,
+      ),
+    );
+
+    return undefined;
+  }
+
+  return {
+    sourceAmount: quote.sourceAmount,
+    destinationAmount: quote.destinationAmount,
+    destinationAmountMin: quote.destinationAmountMin,
+    path: quote.path ?? [],
+    conversionRate: quote.conversionRate,
+    source: quote.source,
+    networkFeeXlm: quote.networkFeeXlm,
+    aggregatorEnvelopeXdr: quote.transaction?.envelopeXdr,
+    requiresTrustlineFirst: quote.requiresTrustline,
+  };
 };
 
 export const useSwapStore = create<SwapState>((set) => ({
@@ -178,6 +295,11 @@ export const useSwapStore = create<SwapState>((set) => ({
     }
   },
 
+  setInputSide: (side) => set({ inputSide: side }),
+
+  setDestinationInputAmount: (amount) =>
+    set({ destinationInputAmount: amount }),
+
   setSourceAmountDisplay: (displayAmount) => {
     // Update only the display value, preserve internal value
     set({ sourceAmountDisplay: displayAmount });
@@ -188,11 +310,25 @@ export const useSwapStore = create<SwapState>((set) => ({
       sourceBalance,
       destinationBalance,
       sourceAmount,
+      destinationAmount: wantedDestinationAmount,
       slippage,
       network,
+      silent,
     } = params;
+    const isExactOut = wantedDestinationAmount !== undefined;
 
-    set({ isLoadingPath: true, pathError: null, pathResult: null });
+    if (!silent) {
+      set({ isLoadingPath: true, pathError: null, pathResult: null });
+    }
+
+    const failPath = (message: string) => {
+      if (silent) return;
+
+      set({
+        isLoadingPath: false,
+        pathError: __DEV__ ? message : t("swapScreen.errors.pathFindFailed"),
+      });
+    };
 
     try {
       const { forceSwapPathFailure } = useDebugStore.getState();
@@ -201,77 +337,78 @@ export const useSwapStore = create<SwapState>((set) => ({
         throw new Error(t("debug.debugMessages.swapPathFailure"));
       }
 
-      // Custom/Soroban tokens cannot be swapped via Horizon's classic DEX
-      const isSourceCustom =
-        "contractId" in sourceBalance ||
-        ("id" in sourceBalance && isContractId(sourceBalance.id ?? ""));
-      const isDestCustom =
-        "contractId" in destinationBalance ||
-        ("id" in destinationBalance &&
-          isContractId(destinationBalance.id ?? ""));
+      const backendPath = await findBackendSwapPath(params);
+      if (
+        backendPath === undefined &&
+        (isExactOut ||
+          getSorobanContractId(sourceBalance) ||
+          getSorobanContractId(destinationBalance))
+      ) {
+        // Only the backend can size an input for a wanted output or route a
+        // Soroban token; Horizon knows classic assets alone. Already logged.
+        failPath("Swap quote unavailable");
 
-      if (isSourceCustom || isDestCustom) {
-        set({
-          isLoadingPath: false,
-          pathError: t("swapScreen.errors.customTokenSwapNotSupported"),
-        });
         return;
       }
-
-      // TODO: Add Soroswap support for Testnet
-      const pathResult = await findClassicSwapPath({
-        sourceBalance,
-        destinationBalance,
-        sourceAmount,
-        network,
-      });
+      const pathResult =
+        backendPath === undefined
+          ? await findClassicSwapPath({
+              sourceBalance,
+              destinationBalance,
+              sourceAmount: sourceAmount ?? "0",
+              slippage,
+              network,
+            })
+          : backendPath;
 
       if (!pathResult) {
-        set({
-          isLoadingPath: false,
-          pathError: t("swapScreen.errors.noPathFound"),
-        });
+        if (!silent) {
+          set({
+            isLoadingPath: false,
+            pathError: t("swapScreen.errors.noPathFound"),
+          });
+        }
         return;
       }
-
-      const destinationAmountMin = computeDestMinWithSlippage(
-        pathResult.destinationAmount,
-        slippage,
-      );
 
       const finalPathResult: SwapPathResult = {
         ...pathResult,
-        destinationAmountMin,
+        quotedAt: Date.now(),
       };
 
       set({
         isLoadingPath: false,
         pathResult: finalPathResult,
         destinationAmount: pathResult.destinationAmount,
+        ...(isExactOut && {
+          sourceAmount: pathResult.sourceAmount,
+          sourceAmountDisplay: formatBigNumberForDisplay(
+            new BigNumber(pathResult.sourceAmount),
+            { decimalPlaces: getBalanceDecimals(sourceBalance) },
+          ),
+        }),
       });
     } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
+      if (!isRequestCanceled(error)) {
+        logger.error("SwapStore", "Failed to find swap path", error);
+      }
 
-      logger.error("SwapStore", "Failed to find swap path", error);
-
-      const displayError = __DEV__
-        ? errorMessage
-        : t("swapScreen.errors.pathFindFailed");
-
-      set({
-        isLoadingPath: false,
-        pathError: displayError,
-      });
+      failPath(error instanceof Error ? error.message : String(error));
     }
   },
 
   clearPath: () =>
-    set({
+    set((state) => ({
       pathResult: null,
       destinationAmount: "0",
       pathError: null,
-    }),
+      // The amount to sell is derived from the typed amount to receive, so it
+      // goes with the quote.
+      ...(state.inputSide === SwapInputSide.DESTINATION && {
+        sourceAmount: "0",
+        sourceAmountDisplay: "0",
+      }),
+    })),
 
   resetSwap: () => set(initialState),
 }));
@@ -314,5 +451,12 @@ export const descriptorAsPathBalance = (
       issuer: { key: descriptor.issuer },
       type: descriptor.tokenType,
     },
+    // A Soroban token declares its own decimals; a classic one is left without
+    // them, which is how the amount converter tells the two apart.
+    ...(descriptor.tokenType === TokenTypeWithCustomToken.CUSTOM_TOKEN && {
+      contractId: descriptor.issuer,
+      symbol: descriptor.tokenCode,
+      decimals: descriptor.decimals,
+    }),
   } as unknown as HeldBalanceItem;
 };

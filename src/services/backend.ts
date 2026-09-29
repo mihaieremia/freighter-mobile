@@ -1176,6 +1176,131 @@ export const submitTransaction = async (body: SubmitTransactionBody) => {
   return data;
 };
 
+/** The venue that quoted a swap. The values are the backend's wire values. */
+export enum SwapQuoteSource {
+  HORIZON = "horizon",
+  XOXNO = "xoxno",
+}
+
+/**
+ * The best swap route across the classic DEX and the XOXNO aggregator, as chosen
+ * by the backend. Amounts are decimal strings in whole-token units.
+ * `transaction` is an unsigned Soroban transaction, present only for the
+ * aggregator route once the sender can receive the destination asset;
+ * `requiresTrustline` marks an aggregator route that needs the destination
+ * trustline first. `networkFeeXlm` is the full fee of `transaction`.
+ */
+export interface SwapQuote {
+  source: SwapQuoteSource;
+  sourceAmount: string;
+  destinationAmount: string;
+  destinationAmountMin: string;
+  destinationDecimals: number;
+  conversionRate: string;
+  path?: string[];
+  transaction?: { envelopeXdr: string };
+  networkFeeXlm?: string;
+  requiresTrustline?: boolean;
+}
+
+/**
+ * Asks the backend for the best swap route. Assets are "XLM" or "CODE:ISSUER".
+ * Pass `sourceAmount` for what the user sells, or `destAmount` for what the user
+ * wants to receive; the backend then sizes the input and returns it as
+ * `sourceAmount`. Rejects with an ApiError; status 404 means no route exists.
+ */
+export const fetchSwapQuote = async ({
+  network,
+  ...body
+}: {
+  network: NETWORKS;
+  sourceAsset: string;
+  destAsset: string;
+  sourceAmount?: string;
+  destAmount?: string;
+  /** Decimals of each token; the backend needs them to read a Soroban token's amount. */
+  sourceDecimals: number;
+  destDecimals: number;
+  sender: string;
+  slippagePercent: number;
+  timeoutSeconds: number;
+}): Promise<SwapQuote> => {
+  const { data } = await freighterBackendV2.post<{ data: SwapQuote }>(
+    "/swap/quote",
+    body,
+    { params: { network } },
+  );
+
+  return data.data;
+};
+
+/** The kind of a listed token. The values are the backend's wire values. */
+export enum SwapListedTokenKind {
+  NATIVE = "native",
+  CLASSIC = "classic",
+  SOROBAN = "soroban",
+}
+
+/**
+ * A token XOXNO lists for swapping that the aggregator routes. A classic asset is
+ * named by its Stellar Asset Contract and swapped as a classic asset (`asset` is its
+ * "CODE:ISSUER", and it needs a trustline); a Soroban token needs neither.
+ */
+export interface SwapListedToken {
+  /** The token's contract id. */
+  id: string;
+  kind: SwapListedTokenKind;
+  /** "CODE:ISSUER" of a classic asset. */
+  asset?: string;
+  code: string;
+  name: string;
+  decimals: number;
+  iconUrl?: string;
+  priceUsd: number;
+}
+
+/** Lists the tokens XOXNO offers for swapping, with the names, icons and prices to show. */
+export const fetchSwapTokens = async (
+  network: NETWORKS,
+): Promise<SwapListedToken[]> => {
+  const { data } = await freighterBackendV2.get<{ data: SwapListedToken[] }>(
+    "/swap/tokens",
+    { params: { network } },
+  );
+
+  return data.data;
+};
+
+/**
+ * A token in XOXNO's catalog: every token it has registered, routable or not.
+ * Display data only (logo and USD price); it says nothing about safety.
+ */
+export interface TokenCatalogEntry {
+  /** The token's contract id (a classic asset's Stellar Asset Contract). */
+  id: string;
+  code: string;
+  name: string;
+  decimals: number;
+  /** Logo URL. May be empty; the logo is then at the deterministic media URL. */
+  iconUrl?: string;
+  /** USD price. 0 or missing when unknown. */
+  priceUsd?: number;
+  /** Whether the aggregator routes the token. */
+  swappable: boolean;
+}
+
+/** Lists every token in XOXNO's catalog, with the logo and USD price to show. */
+export const fetchTokenCatalog = async (
+  network: NETWORKS,
+): Promise<TokenCatalogEntry[]> => {
+  const { data } = await freighterBackendV2.get<{ data: TokenCatalogEntry[] }>(
+    "/swap/tokens",
+    { params: { network, scope: "all" } },
+  );
+
+  return data.data;
+};
+
 /**
  * Response from the protocols API
  * @interface ProtocolsResponse

@@ -1,6 +1,9 @@
 /* eslint-disable no-underscore-dangle */
 import { NETWORKS } from "config/constants";
-import { fetchTrendingAssets } from "services/stellarExpert";
+import {
+  fetchTrendingAssets,
+  fetchTransactionMeta,
+} from "services/stellarExpert";
 
 // Override the global jest.setup.js mock so we test the real implementation
 // with only the underlying API calls intercepted.
@@ -64,6 +67,27 @@ describe("stellarExpert service", () => {
         "/asset",
         expect.objectContaining({ signal: controller.signal }),
       );
+    });
+  });
+
+  describe("fetchTransactionMeta", () => {
+    it("hands the retry setting to the request and returns the meta", async () => {
+      apiFactory.__get.mockResolvedValue({ data: { meta: "AAAA" } });
+      const retry = { retries: 2, initialDelay: 3000 };
+
+      const meta = await fetchTransactionMeta("abc", NETWORKS.PUBLIC, retry);
+
+      expect(meta).toBe("AAAA");
+      expect(apiFactory.__get).toHaveBeenCalledWith(
+        "/tx/abc",
+        expect.objectContaining({ retry }),
+      );
+    });
+
+    it("returns null when the request keeps failing", async () => {
+      apiFactory.__get.mockRejectedValue(new Error("404"));
+
+      expect(await fetchTransactionMeta("abc", NETWORKS.PUBLIC)).toBeNull();
     });
   });
 });

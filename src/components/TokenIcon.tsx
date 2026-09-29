@@ -15,6 +15,8 @@ import {
 } from "config/types";
 import { useTokenIconsStore } from "ducks/tokenIcons";
 import { getTokenIdentifier, isLiquidityPool } from "helpers/balances";
+import { getCatalogIconUrl } from "helpers/tokenCatalog";
+import { useTokenCatalogEntry } from "hooks/useTokenCatalogEntry";
 import React from "react";
 import { useTranslation } from "react-i18next";
 
@@ -222,15 +224,20 @@ const TokenIconWithStore: React.FC<{
     isTokenFailed,
   ]);
 
+  // The catalog logo is the last resort: a token the other sources have no
+  // logo for still shows XOXNO's when the catalog lists it.
+  const catalogEntry = useTokenCatalogEntry(tokenIdentifier);
+  const catalogIconUrl = catalogEntry && getCatalogIconUrl(catalogEntry);
+
   // When validation explicitly failed and no prior valid URL exists, pass
   // undefined so ImageWithFallback shows fallback immediately rather than
   // firing an HTTP request to a URL the store already knows is bad.
   const finalImageUrl = React.useMemo(() => {
     if (icon?.isValid === false) {
-      return icon?.lastValidImageUrl || iconUrl || undefined;
+      return icon?.lastValidImageUrl || iconUrl || catalogIconUrl || undefined;
     }
-    return icon?.imageUrl || lastValidImageUrl || iconUrl;
-  }, [icon, lastValidImageUrl, iconUrl]);
+    return icon?.imageUrl || lastValidImageUrl || iconUrl || catalogIconUrl;
+  }, [icon, lastValidImageUrl, iconUrl, catalogIconUrl]);
 
   // Validation lock acquired but prefetch not yet complete.
   const isStoreValidating =

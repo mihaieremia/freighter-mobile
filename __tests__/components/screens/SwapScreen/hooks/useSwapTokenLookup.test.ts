@@ -1,3 +1,4 @@
+/* eslint-disable @fnando/consistent-import/consistent-import */
 import { renderHook, act } from "@testing-library/react-hooks";
 import BigNumber from "bignumber.js";
 import {
@@ -9,12 +10,26 @@ import { TokenTypeWithCustomToken } from "config/types";
 import { type HeldBalanceItem } from "hooks/useBalancesList";
 import * as stellarExpert from "services/stellarExpert";
 
+import { CONTRACT, soroban } from "../../../../../__mocks__/swapFixtures";
+
+// XOXNO's swap list comes from its own hook (tested separately); here it is a
+// controllable stub so it does not draw on the shared mocks below.
+const mockSoroban: {
+  routableIds: ReadonlySet<string>;
+  listedRecords: unknown[];
+} = { routableIds: new Set(), listedRecords: [] };
+jest.mock("components/screens/SwapScreen/hooks/useSwapListedTokens", () => ({
+  useSwapListedTokens: () => mockSoroban,
+}));
+
 // The hook holds a module-scoped trending memory cache so component
 // remounts within an app session paint instantly. Reset it between
 // every test so earlier cases can't leak a populated map into later
 // cases asserting on an empty trending list or a cold-start spinner.
 beforeEach(() => {
   resetTrendingMemoryCacheForTests();
+  mockSoroban.routableIds = new Set();
+  mockSoroban.listedRecords = [];
 });
 
 // Shared holders for store method mocks. Arrow (not jest.fn) wrappers are used
@@ -181,6 +196,21 @@ const settleDebounce = async () => {
   });
 };
 
+const resetStoreDefaults = (
+  records: unknown[] = [],
+  verified: unknown[] = [],
+) => {
+  mockStores.getStellarExpertTopTokens.mockResolvedValue({
+    _embedded: { records },
+    _links: { self: { href: "" }, prev: { href: "" }, next: { href: "" } },
+  });
+  mockStores.scanBulkWithCache.mockResolvedValue({ results: {} });
+  mockStores.readTopCache.mockResolvedValue(null);
+  mockStores.readVerifiedCache.mockResolvedValue(null);
+  mockStores.readScansFor.mockResolvedValue({ hits: {}, missing: [] });
+  mockStores.getVerifiedTokens.mockResolvedValue(verified);
+};
+
 const mockTrendingRecords = [
   // Classic — AQUA (not held)
   {
@@ -211,24 +241,7 @@ describe("useSwapTokenLookup — idle mode", () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
-    mockStores.getStellarExpertTopTokens.mockResolvedValue({
-      _embedded: { records: mockTrendingRecords },
-      _links: {
-        self: { href: "" },
-        prev: { href: "" },
-        next: { href: "" },
-      },
-    });
-    mockStores.scanBulkWithCache.mockResolvedValue({ results: {} });
-    // Cold-start defaults for the SWR pipeline: no cache present, so the
-    // hook falls through to the live fetch path that these tests assert on.
-    mockStores.readTopCache.mockResolvedValue(null);
-    mockStores.readVerifiedCache.mockResolvedValue(null);
-    mockStores.readScansFor.mockResolvedValue({ hits: {}, missing: [] });
-    // computeTrendingIntersection intersects with this list directly.
-    // Mark the assets used in mockTrendingRecords (AQUA + USDC) as verified
-    // by default so the trending list isn't empty for the bulk of tests.
-    mockStores.getVerifiedTokens.mockResolvedValue([
+    resetStoreDefaults(mockTrendingRecords, [
       { issuer: USDC_ISSUER, name: "USDC", code: "USDC", domain: "circle.com" },
       {
         issuer: AQUA_ISSUER,
@@ -525,15 +538,7 @@ describe("useSwapTokenLookup — active search", () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
-    mockStores.getStellarExpertTopTokens.mockResolvedValue({
-      _embedded: { records: [] },
-      _links: { self: { href: "" }, prev: { href: "" }, next: { href: "" } },
-    });
-    mockStores.scanBulkWithCache.mockResolvedValue({ results: {} });
-    mockStores.readTopCache.mockResolvedValue(null);
-    mockStores.readVerifiedCache.mockResolvedValue(null);
-    mockStores.readScansFor.mockResolvedValue({ hits: {}, missing: [] });
-    mockStores.getVerifiedTokens.mockResolvedValue([]);
+    resetStoreDefaults();
   });
 
   afterEach(() => {
@@ -957,15 +962,7 @@ describe("useSwapTokenLookup — holdsOnly (Swap from picker)", () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
-    mockStores.getStellarExpertTopTokens.mockResolvedValue({
-      _embedded: { records: mockTrendingRecords },
-      _links: { self: { href: "" }, prev: { href: "" }, next: { href: "" } },
-    });
-    mockStores.scanBulkWithCache.mockResolvedValue({ results: {} });
-    mockStores.readTopCache.mockResolvedValue(null);
-    mockStores.readVerifiedCache.mockResolvedValue(null);
-    mockStores.readScansFor.mockResolvedValue({ hits: {}, missing: [] });
-    mockStores.getVerifiedTokens.mockResolvedValue([]);
+    resetStoreDefaults(mockTrendingRecords);
   });
 
   afterEach(() => {
@@ -1445,5 +1442,156 @@ describe("useSwapTokenLookup — SWR for trending", () => {
       caught = e;
     }
     expect((caught as Error).message).toMatch(/stellar\.expert returned null/);
+  });
+});
+
+describe("useSwapTokenLookup — Soroban tokens", () => {
+  const OTHER_CONTRACT =
+    "CC64WBDGS6QQP22QTTIACYIXT3WF7BBQEYOQPLTP7GTKYY7PZ74QYGSL";
+
+  const sorobanBalance = (contractId: string, symbol: string) =>
+    ({
+      ...soroban(18),
+      id: `${symbol}:${contractId}`,
+      tokenCode: symbol,
+      displayName: symbol,
+      tokenType: TokenTypeWithCustomToken.CUSTOM_TOKEN,
+      contractId,
+      symbol,
+      token: {
+        type: TokenTypeWithCustomToken.CUSTOM_TOKEN,
+        code: symbol,
+        issuer: { key: contractId },
+      },
+      available: new BigNumber(5),
+    }) as unknown as HeldBalanceItem;
+
+  const record = (contractId: string, code: string) => ({
+    tokenCode: code,
+    name: code,
+    domain: "",
+    hasTrustline: true,
+    issuer: contractId,
+    isNative: false,
+    tokenType: TokenTypeWithCustomToken.CUSTOM_TOKEN,
+    decimals: 18,
+    price: 1.02,
+  });
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.clearAllMocks();
+    resetStoreDefaults();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  const render = (balanceItems: HeldBalanceItem[], holdsOnly = false) =>
+    renderHook(() =>
+      useSwapTokenLookup({ network: NETWORKS.PUBLIC, balanceItems, holdsOnly }),
+    );
+
+  const settle = () =>
+    act(async () => {
+      await settleAsync();
+    });
+
+  const search = async (
+    result: ReturnType<typeof render>["result"],
+    term: string,
+  ) => {
+    act(() => {
+      result.current.handleSearch(term);
+    });
+    await settleDebounce();
+    await settle();
+  };
+
+  it("lists a held Soroban token the aggregator routes among your tokens", async () => {
+    mockSoroban.routableIds = new Set([CONTRACT]);
+    const held = [...buildHeldBalances(), sorobanBalance(CONTRACT, "deJTRSY")];
+
+    const { result } = render(held);
+    await settle();
+
+    expect(result.current.yourTokens.map((t) => t.id)).toContain(
+      `deJTRSY:${CONTRACT}`,
+    );
+  });
+
+  it("keeps a held Soroban token the aggregator does not route out of your tokens", async () => {
+    mockSoroban.routableIds = new Set([CONTRACT]);
+    const held = [
+      ...buildHeldBalances(),
+      sorobanBalance(OTHER_CONTRACT, "deJAAA"),
+    ];
+
+    const { result } = render(held);
+    await settle();
+
+    expect(result.current.yourTokens.map((t) => t.id)).not.toContain(
+      `deJAAA:${OTHER_CONTRACT}`,
+    );
+  });
+
+  it("offers listed Soroban tokens as destinations after the classic popular ones", async () => {
+    mockSoroban.listedRecords = [record(CONTRACT, "deJTRSY")];
+
+    const { result } = render(buildHeldBalances());
+    await settle();
+
+    const codes = result.current.popularTokens.map((t) => t.tokenCode);
+    expect(codes).toContain("deJTRSY");
+    expect(codes.at(-1)).toBe("deJTRSY");
+  });
+
+  it("does not offer Soroban destinations in the swap-from picker", async () => {
+    mockSoroban.listedRecords = [record(CONTRACT, "deJTRSY")];
+
+    const { result } = render(buildHeldBalances(), true);
+    await settle();
+
+    expect(result.current.popularTokens).toEqual([]);
+  });
+
+  it("finds a listed Soroban token by code, name or contract when searching, without sending the contract to the classic security scan", async () => {
+    mockSoroban.listedRecords = [record(CONTRACT, "deJTRSY")];
+    (stellarExpert.searchToken as jest.Mock).mockResolvedValue({
+      _embedded: { records: [] },
+      _links: {},
+    });
+
+    const { result } = render(buildHeldBalances());
+    await settle();
+
+    await search(result, "dejtr");
+    expect(
+      result.current.verifiedSearchMatches.map((t) => t.tokenCode),
+    ).toEqual(["deJTRSY"]);
+
+    await search(result, CONTRACT.toLowerCase());
+    expect(
+      result.current.verifiedSearchMatches.map((t) => t.tokenCode),
+    ).toEqual(["deJTRSY"]);
+
+    const scanned = mockStores.scanBulkWithCache.mock.calls.flatMap(
+      ([params]) => params.addressList as string[],
+    );
+    expect(scanned.some((address) => address.includes(CONTRACT))).toBe(false);
+  });
+
+  it("finds a held Soroban token the aggregator routes when searching", async () => {
+    mockSoroban.routableIds = new Set([CONTRACT]);
+    const held = [...buildHeldBalances(), sorobanBalance(CONTRACT, "deJTRSY")];
+
+    const { result } = render(held);
+    await settle();
+    await search(result, "dejtr");
+
+    expect(result.current.heldSearchMatches.map((t) => t.tokenCode)).toEqual([
+      "deJTRSY",
+    ]);
   });
 });

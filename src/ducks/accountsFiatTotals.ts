@@ -1,16 +1,19 @@
 import { BigNumber } from "bignumber.js";
-import { NETWORKS } from "config/constants";
+import { NETWORKS, mapNetworkToNetworkDetails } from "config/constants";
 import { logger } from "config/logger";
 import { BalanceMap, PricedBalanceMap, TokenPricesMap } from "config/types";
 import { usePricesStore } from "ducks/prices";
 import { useRemoteConfigStore } from "ducks/remoteConfig";
+import { useTokenCatalogStore } from "ducks/tokenCatalog";
 import {
   getTokenIdentifier,
   getTokenIdentifiersFromBalances,
   getTotalUsdLabel,
 } from "helpers/balances";
+import { getBalanceDecimalTotal } from "helpers/formatAmount";
 import { isMainnet } from "helpers/networks";
-import { fetchBalances } from "services/backend";
+import { getCatalogPriceFor, pickPrice } from "helpers/tokenCatalog";
+import { fetchBalances, TokenCatalogEntry } from "services/backend";
 import { create } from "zustand";
 
 /**
@@ -96,8 +99,9 @@ interface AccountsFiatTotalsState {
 
 /**
  * Sums the USD value of every priced token in an account's balances.
- * Tokens without a known price (custom tokens, LP shares, price fetch
- * failures) contribute zero.
+ * A token the prices map does not know is priced from the XOXNO catalog when
+ * the catalog lists it. Tokens without a known price (custom tokens, LP
+ * shares, price fetch failures) contribute zero.
  *
  * Also reports how many tokens actually priced, which is what separates a
  * genuine zero from a total that couldn't be read: a funded account where
@@ -106,18 +110,27 @@ interface AccountsFiatTotalsState {
 const computeFiatTotal = (
   balances: BalanceMap,
   prices: TokenPricesMap,
+  catalog: Record<string, TokenCatalogEntry> | undefined,
+  networkPassphrase: string,
 ): { total: BigNumber; pricedCount: number } =>
   Object.values(balances).reduce(
     (acc, balance) => {
       const identifier = getTokenIdentifier(balance);
-      const currentPrice = identifier ? prices[identifier]?.currentPrice : null;
+      const currentPrice = identifier
+        ? pickPrice(
+            prices[identifier]?.currentPrice,
+            getCatalogPriceFor(catalog, identifier, networkPassphrase),
+          )
+        : null;
 
       if (!currentPrice) {
         return acc;
       }
 
       return {
-        total: acc.total.plus(balance.total.multipliedBy(currentPrice)),
+        total: acc.total.plus(
+          getBalanceDecimalTotal(balance).multipliedBy(currentPrice),
+        ),
         pricedCount: acc.pricedCount + 1,
       };
     },
@@ -255,6 +268,12 @@ export const useAccountsFiatTotalsStore = create<AccountsFiatTotalsState>(
         // understated. Track it and skip the freshness stamp below — the TTL
         // must not protect known-suspect numbers from the next trigger.
         let pricesFetchFailed = false;
+        // Started with the balances so it is usually ready by the first batch;
+        // it never rejects, and a failure only leaves catalog prices out.
+        const catalogReady = useTokenCatalogStore
+          .getState()
+          .fetchCatalog(network);
+        const { networkPassphrase } = mapNetworkToNetworkDetails(network);
 
         try {
           for (
@@ -343,7 +362,15 @@ export const useAccountsFiatTotalsStore = create<AccountsFiatTotalsState>(
               return;
             }
 
+            // eslint-disable-next-line no-await-in-loop
+            await catalogReady;
+            if (fetchGeneration !== thisGeneration) {
+              return;
+            }
+
             const prices = usePricesStore.getState().pricesByNetwork[network];
+            const catalog =
+              useTokenCatalogStore.getState().byNetwork[network]?.byContractId;
 
             // The label is decided here rather than in the row because this is
             // the only place that knows all of it: whether the fetch failed,
@@ -352,7 +379,12 @@ export const useAccountsFiatTotalsStore = create<AccountsFiatTotalsState>(
             results.forEach(({ publicKey, balances, isFunded }) => {
               const hasError = balances === null;
               const { total, pricedCount } = balances
-                ? computeFiatTotal(balances, prices ?? {})
+                ? computeFiatTotal(
+                    balances,
+                    prices ?? {},
+                    catalog,
+                    networkPassphrase,
+                  )
                 : { total: new BigNumber(0), pricedCount: 0 };
 
               batchTotals[publicKey] = {

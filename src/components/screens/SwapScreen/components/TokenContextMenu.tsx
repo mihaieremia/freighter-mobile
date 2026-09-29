@@ -7,6 +7,7 @@ import Icon from "components/sds/Icon";
 import { NATIVE_TOKEN_CODE, NETWORKS } from "config/constants";
 import { logger } from "config/logger";
 import { isNativeAssetId } from "helpers/assetIdentity";
+import { isContractId } from "helpers/soroban";
 import { getStellarExpertUrl } from "helpers/stellarExpert";
 import useAppTranslation from "hooks/useAppTranslation";
 import { useClipboard } from "hooks/useClipboard";
@@ -45,7 +46,7 @@ const TokenContextMenu: React.FC<TokenContextMenuProps> = ({
     let url: string | undefined;
 
     if (contractAddress) {
-      if (token.contractId) {
+      if (token.contractId || isContractId(contractAddress)) {
         url = `${getStellarExpertUrl(network)}/contract/${contractAddress}`;
       } else {
         url = `${getStellarExpertUrl(network)}/asset/${token.tokenCode}-${contractAddress}`;

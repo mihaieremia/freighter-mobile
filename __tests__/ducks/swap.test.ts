@@ -1,7 +1,10 @@
+/* eslint-disable @fnando/consistent-import/consistent-import */
 import { act, renderHook } from "@testing-library/react-hooks";
 import { DestinationTokenDescriptor } from "components/screens/SwapScreen/helpers";
 import { TokenTypeWithCustomToken } from "config/types";
 import { useSwapStore, descriptorAsPathBalance } from "ducks/swap";
+
+import { CONTRACT, ISSUER } from "../../__mocks__/swapFixtures";
 
 describe("useSwapStore — destinationToken migration", () => {
   beforeEach(() => {
@@ -144,5 +147,37 @@ describe("descriptorAsPathBalance", () => {
         requiresTrustline: true,
       }),
     ).toThrow(/missing issuer/);
+  });
+});
+
+describe("descriptorAsPathBalance — Soroban tokens", () => {
+  it("carries the contract and decimals a Soroban token declares", () => {
+    const shim = descriptorAsPathBalance({
+      id: `deJTRSY:${CONTRACT}`,
+      tokenCode: "deJTRSY",
+      issuer: CONTRACT,
+      decimals: 18,
+      tokenType: TokenTypeWithCustomToken.CUSTOM_TOKEN,
+      requiresTrustline: false,
+    }) as any;
+
+    expect(shim.contractId).toBe(CONTRACT);
+    expect(shim.decimals).toBe(18);
+    expect(shim.symbol).toBe("deJTRSY");
+    expect(shim.token.issuer.key).toBe(CONTRACT);
+  });
+
+  it("leaves a classic asset without decimals, which is how the converter tells them apart", () => {
+    const shim = descriptorAsPathBalance({
+      id: `USDC:${ISSUER}`,
+      tokenCode: "USDC",
+      issuer: ISSUER,
+      decimals: 7,
+      tokenType: TokenTypeWithCustomToken.CREDIT_ALPHANUM4,
+      requiresTrustline: true,
+    }) as any;
+
+    expect(shim).not.toHaveProperty("decimals");
+    expect(shim).not.toHaveProperty("contractId");
   });
 });

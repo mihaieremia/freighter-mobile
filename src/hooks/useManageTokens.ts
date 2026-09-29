@@ -1,15 +1,8 @@
 import { AnalyticsEvent } from "config/analyticsConfig";
-import {
-  DEFAULT_DECIMALS,
-  NETWORKS,
-  STORAGE_KEYS,
-  VISUAL_DELAY_MS,
-} from "config/constants";
+import { DEFAULT_DECIMALS, NETWORKS, VISUAL_DELAY_MS } from "config/constants";
 import { logger } from "config/logger";
 import {
   TokenTypeWithCustomToken,
-  CustomToken,
-  CustomTokenStorage,
   FormattedSearchTokenRecord,
 } from "config/types";
 import { ActiveAccount } from "ducks/auth";
@@ -21,12 +14,16 @@ import { ToastOptions, useToast } from "providers/ToastProvider";
 import { useState } from "react";
 import { analytics } from "services/analytics";
 import {
+  getCustomTokenStorage,
+  saveCustomToken,
+  saveCustomTokenStorage,
+} from "services/customTokenStorage";
+import {
   buildChangeTrustTx,
   isHorizonError,
   signTransaction,
   submitTx,
 } from "services/stellar";
-import { dataStorage } from "services/storage/storageFactory";
 
 const WALLET_LOCKED_ERROR = "Wallet is locked";
 
@@ -78,42 +75,6 @@ export interface AddTokenParams {
   tokenType?: TokenTypeWithCustomToken;
 }
 
-/**
- * Helper to get CustomTokenStorage from storage
- * @returns The current custom token storage, or an empty object if none exists
- */
-const getCustomTokenStorage = async (): Promise<CustomTokenStorage> => {
-  const storageData = await dataStorage.getItem(STORAGE_KEYS.CUSTOM_TOKEN_LIST);
-  if (!storageData) {
-    return {};
-  }
-
-  try {
-    return JSON.parse(storageData) as CustomTokenStorage;
-  } catch (e) {
-    logger.error(
-      "getCustomTokenStorage",
-      "Error parsing custom token storage",
-      e,
-    );
-
-    return {};
-  }
-};
-
-/**
- * Helper to save CustomTokenStorage to storage
- * @param storage The updated storage to save
- */
-const saveCustomTokenStorage = async (
-  storage: CustomTokenStorage,
-): Promise<void> => {
-  await dataStorage.setItem(
-    STORAGE_KEYS.CUSTOM_TOKEN_LIST,
-    JSON.stringify(storage),
-  );
-};
-
 export const useManageTokens = ({
   network,
   account,
@@ -153,31 +114,16 @@ export const useManageTokens = ({
 
     try {
       if (token.tokenType === TokenTypeWithCustomToken.CUSTOM_TOKEN) {
-        // Create new custom token entry
-        const customToken: CustomToken = {
-          contractId: token.issuer,
-          symbol: token.tokenCode,
-          name: token.name ?? token.tokenCode,
-          decimals: token.decimals ?? DEFAULT_DECIMALS,
-        };
-
-        // Get current storage
-        const storage = await getCustomTokenStorage();
-
-        // Initialize nested structure if needed
-        if (!storage[publicKey]) {
-          storage[publicKey] = {};
-        }
-
-        if (!storage[publicKey][network]) {
-          storage[publicKey][network] = [];
-        }
-
-        // Add the new token
-        storage[publicKey][network].push(customToken);
-
-        // Save back to storage
-        await saveCustomTokenStorage(storage);
+        await saveCustomToken({
+          publicKey,
+          network,
+          token: {
+            contractId: token.issuer,
+            symbol: token.tokenCode,
+            name: token.name ?? token.tokenCode,
+            decimals: token.decimals ?? DEFAULT_DECIMALS,
+          },
+        });
 
         // Add visual delay for custom token addition
         await new Promise((resolve) => {
