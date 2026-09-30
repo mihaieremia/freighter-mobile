@@ -3,11 +3,13 @@ import {
   LIFI_AQUARIUS,
   LIFI_FEE_BPS,
   LIFI_FEE_RECIPIENT,
+  LIFI_MAX_ROUTES,
+  LIFI_MIN_VENUE_AMOUNT,
   LIFI_SOROSWAP,
   LIFI_SWAP_ROUTER,
 } from "config/lifiSwap";
 import type { AggregatorSwapExpectation } from "helpers/aggregatorSwap";
-import { addressToString } from "helpers/soroban";
+import { addressToString, scValFields } from "helpers/soroban";
 
 const fail = (): never => {
   throw new Error(
@@ -22,17 +24,6 @@ const unsignedInteger = (v?: xdr.ScVal): bigint =>
   v?.type === "scvU128" ? scValToBigInt(v) : fail();
 const vector = (v?: xdr.ScVal): xdr.ScVal[] =>
   v?.type === "scvVec" && v.vec ? v.vec : fail();
-const fields = (v: xdr.ScVal, names: string[]): Map<string, xdr.ScVal> => {
-  if (v.type !== "scvMap" || v.map?.length !== names.length) return fail();
-  const result = new Map<string, xdr.ScVal>();
-  v.map.forEach((e) => {
-    if (e.key.type !== "scvSymbol") fail();
-    const key = xdr.expectUnionVariant(e.key, "scvSymbol").sym.toString();
-    if (!names.includes(key) || result.has(key)) fail();
-    result.set(key, e.val);
-  });
-  return result;
-};
 const contractCall = (
   node: xdr.SorobanAuthorizedInvocation,
 ): xdr.InvokeContractArgs =>
@@ -65,7 +56,12 @@ const checkAquariusRoute = (
   authorizedHops: xdr.ScVal,
   expected: AggregatorSwapExpectation,
 ) => {
-  const route = fields(distribution, ["bytes", "parts", "path", "protocol_id"]);
+  const route = scValFields(distribution, [
+    "bytes",
+    "parts",
+    "path",
+    "protocol_id",
+  ]);
   const protocol = route.get("protocol_id");
   const parts = route.get("parts");
   if (
@@ -76,6 +72,7 @@ const checkAquariusRoute = (
   )
     return fail();
   const path = vector(route.get("path"));
+  if (path.some((token) => token.type !== "scvAddress")) return fail();
   const pools = vector(route.get("bytes"));
   const hops = vector(authorizedHops);
   if (
@@ -101,7 +98,89 @@ const checkAquariusRoute = (
       return fail();
     return undefined;
   });
+  return parts.u32;
+};
+
+/** Soroswap floors allocations; the final route receives the rounding remainder. */
+const checkLifiDistribution = (
+  parts: number[],
+  amounts: bigint[],
+  input: bigint,
+) => {
+  const totalParts = parts.reduce((sum, part) => sum + BigInt(part), 0n);
+  if (totalParts > 0xffff_ffffn) return fail();
+  let remaining = input;
+  parts.forEach((part, i) => {
+    let amount = remaining;
+    if (i !== parts.length - 1) {
+      amount = input * BigInt(part);
+      if (amount > 2n ** 127n - 1n) fail();
+      amount /= totalParts;
+    }
+    if (amounts[i] !== amount) fail();
+    remaining -= amount;
+  });
   return undefined;
+};
+
+/** Binds sender consent to the fee transfer and exact net-input Soroswap trade. */
+const checkLifiAuthorization = (
+  call: xdr.InvokeContractArgs,
+  args: xdr.ScVal[],
+  auth: xdr.SorobanAuthorizationEntry[],
+  expected: AggregatorSwapExpectation,
+  fee: bigint,
+) => {
+  const net = expected.sourceAmount - fee;
+  if (
+    auth.length !== 1 ||
+    auth[0].credentials.type !== "sorobanCredentialsSourceAccount"
+  )
+    return fail();
+  const root = auth[0].rootInvocation;
+  if (
+    contractCall(root).toXDR("base64") !== call.toXDR("base64") ||
+    root.subInvocations.length !== 2
+  )
+    return fail();
+  checkTransfer(root.subInvocations[0], expected, LIFI_FEE_RECIPIENT, fee);
+  const swap = root.subInvocations[1];
+  const swapCall = contractCall(swap);
+  if (
+    addressToString(swapCall.contractAddress) !== LIFI_SOROSWAP ||
+    swapCall.functionName.toString() !== "swap_exact_tokens_for_tokens" ||
+    swapCall.args.length !== args.length ||
+    integer(swapCall.args[2]) !== net ||
+    swapCall.args.some(
+      (v, i) => i !== 2 && v.toXDR("base64") !== args[i].toXDR("base64"),
+    )
+  )
+    return fail();
+  const routes = vector(args[4]);
+  if (routes.length !== swap.subInvocations.length) return fail();
+  const parts: number[] = [];
+  const amounts: bigint[] = [];
+  // ponytail: Aquarius only; add other venue authorization ABIs when verified.
+  swap.subInvocations.forEach((venue, i) => {
+    const venueCall = contractCall(venue);
+    const a = venueCall.args;
+    if (
+      addressToString(venueCall.contractAddress) !== LIFI_AQUARIUS ||
+      venueCall.functionName.toString() !== "swap_chained" ||
+      a.length !== 5 ||
+      address(a[0]) !== expected.sender ||
+      address(a[2]) !== expected.sourceToken ||
+      venue.subInvocations.length !== 1 ||
+      unsignedInteger(a[4]) !== 0n
+    )
+      fail();
+    parts.push(checkAquariusRoute(routes[i], a[1], expected));
+    const amount = unsignedInteger(a[3]);
+    if (amount < LIFI_MIN_VENUE_AMOUNT) fail();
+    checkTransfer(venue.subInvocations[0], expected, LIFI_AQUARIUS, amount);
+    amounts.push(amount);
+  });
+  return checkLifiDistribution(parts, amounts, net);
 };
 
 /** Checks both layers and the whole sender spend tree; no envelope rewriting. */
@@ -125,7 +204,7 @@ export const checkLifiSwap = (
     address(call.args[1]) !== expected.sender
   )
     return fail();
-  const payload = fields(call.args[0], [
+  const payload = scValFields(call.args[0], [
     "args",
     "fees",
     "interface",
@@ -134,6 +213,7 @@ export const checkLifiSwap = (
     "token_out",
     "tracking_id",
   ]);
+  integer(payload.get("tracking_id"));
   const iface = payload.get("interface");
   const minimum = integer(payload.get("min_amount_out"));
   if (
@@ -160,73 +240,24 @@ export const checkLifiSwap = (
     return fail();
   const fees = vector(payload.get("fees"));
   if (fees.length !== 1) return fail();
-  const feeFields = fields(fees[0], ["fee_bps", "fee_destination"]);
+  const feeFields = scValFields(fees[0], ["fee_bps", "fee_destination"]);
   const bps = feeFields.get("fee_bps");
   if (
     integer(bps) !== LIFI_FEE_BPS ||
     address(feeFields.get("fee_destination")) !== LIFI_FEE_RECIPIENT
   )
     return fail();
-  const fee = (expected.sourceAmount * LIFI_FEE_BPS) / 10_000n;
-  const net = expected.sourceAmount - fee;
-  if (
-    auth.length !== 1 ||
-    auth[0].credentials.type !== "sorobanCredentialsSourceAccount"
-  )
-    return fail();
-  const root = auth[0].rootInvocation;
-  if (
-    contractCall(root).toXDR("base64") !== call.toXDR("base64") ||
-    root.subInvocations.length !== 2
-  )
-    return fail();
-  checkTransfer(root.subInvocations[0], expected, LIFI_FEE_RECIPIENT, fee);
-  const swap = root.subInvocations[1];
-  const swapCall = contractCall(swap);
-  if (
-    addressToString(swapCall.contractAddress) !== LIFI_SOROSWAP ||
-    swapCall.functionName.toString() !== "swap_exact_tokens_for_tokens" ||
-    swapCall.args.length !== args.length ||
-    integer(swapCall.args[2]) !== net ||
-    swapCall.args.some(
-      (v, i) => i !== 2 && v.toXDR("base64") !== args[i].toXDR("base64"),
-    ) ||
-    swap.subInvocations.length === 0
-  )
-    return fail();
   const routes = vector(args[4]);
-  if (routes.length !== swap.subInvocations.length) return fail();
-  let spent = 0n;
-  // ponytail: Aquarius only; add other venue authorization ABIs when verified.
-  swap.subInvocations.forEach((venue, i) => {
-    const venueCall = contractCall(venue);
-    const a = venueCall.args;
-    if (
-      addressToString(venueCall.contractAddress) !== LIFI_AQUARIUS ||
-      venueCall.functionName.toString() !== "swap_chained" ||
-      a.length !== 5 ||
-      address(a[0]) !== expected.sender ||
-      address(a[2]) !== expected.sourceToken ||
-      venue.subInvocations.length !== 1 ||
-      unsignedInteger(a[4]) < 0n
-    )
-      fail();
-    checkAquariusRoute(routes[i], a[1], expected);
-    const amount = unsignedInteger(a[3]);
-    if (amount <= 0n) fail();
-    checkTransfer(venue.subInvocations[0], expected, LIFI_AQUARIUS, amount);
-    spent += amount;
-    if (spent > net) fail();
-  });
-  if (spent !== net) return fail();
-  return undefined;
+  if (routes.length > LIFI_MAX_ROUTES) return fail();
+  const fee = (expected.sourceAmount * LIFI_FEE_BPS) / 10_000n;
+  return checkLifiAuthorization(call, args, auth, expected, fee);
 };
 
 /** History only: signing always uses the full verifier above. */
 export const readLifiSwap = (args: xdr.ScVal[]) => {
   try {
     if (args.length !== 2) return null;
-    const payload = fields(args[0], [
+    const payload = scValFields(args[0], [
       "args",
       "fees",
       "interface",

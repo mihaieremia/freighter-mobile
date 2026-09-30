@@ -154,6 +154,29 @@ export const addressToString = (address: xdr.ScAddress) => {
 export const scValToAddress = (scVal: xdr.ScVal): xdr.ScAddress =>
   xdr.expectUnionVariant(scVal, "scvAddress").address;
 
+/** Reads exactly the named struct fields, in canonical symbol order. */
+export const scValFields = (
+  value: xdr.ScVal,
+  names: string[],
+): Map<string, xdr.ScVal> => {
+  if (value.type !== "scvMap" || value.map?.length !== names.length) {
+    throw new Error("Unsafe swap transaction: unexpected struct field count");
+  }
+  return new Map(
+    value.map.map((entry, i) => {
+      if (
+        entry.key.type !== "scvSymbol" ||
+        entry.key.sym.toString() !== names[i]
+      ) {
+        throw new Error(
+          "Unsafe swap transaction: unexpected or unordered field",
+        );
+      }
+      return [names[i], entry.val];
+    }),
+  );
+};
+
 /**
  * Extracts the address credentials from a SorobanCredentials union, handling
  * all CAP-71 address arms. Returns null for source-account credentials, which

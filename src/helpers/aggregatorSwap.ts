@@ -9,7 +9,11 @@ import { NETWORKS, mapNetworkToNetworkDetails } from "config/constants";
 import { LIFI_MAX_LIFETIME_SECONDS } from "config/lifiSwap";
 import { XOXNO_SWAP_ROUTER } from "config/xoxnoSwap";
 import { checkLifiSwap } from "helpers/lifiSwap";
-import { addressToString, getInvokeContractArgs } from "helpers/soroban";
+import {
+  addressToString,
+  getInvokeContractArgs,
+  scValFields,
+} from "helpers/soroban";
 import { SwapQuoteSource } from "services/backend";
 
 export const ROUTER_SWAP_FUNCTION = "execute_strategy";
@@ -69,12 +73,7 @@ const parseRoutePayload = (payload: Uint8Array): RoutePayload => {
     return fail("route payload is not a struct");
   }
 
-  const fields = new Map<string, xdr.ScVal>();
-  payloadVal.map.forEach((entry) => {
-    if (entry.key.type !== "scvSymbol") return fail("route payload field name");
-    fields.set(entry.key.sym.toString(), entry.val);
-    return undefined;
-  });
+  const fields = scValFields(payloadVal, ["amounts", "assets", "ops"]);
 
   const assets = fields.get("assets");
   const amounts = fields.get("amounts");
@@ -225,6 +224,9 @@ export const verifyAggregatorSwap = (
   const { ext } = envelope.v1.tx;
   if (ext.type !== "sorobanData") return fail("no Soroban resource data");
   const resourceFeeStroops = ext.sorobanData.resourceFee;
+  if (resourceFeeStroops < 0n || resourceFeeStroops > feeStroops) {
+    return fail("resource fee is out of range");
+  }
 
   const [op] = tx.operations;
   if (op.type !== "invokeHostFunction" || op.source) {
@@ -241,11 +243,9 @@ export const verifyAggregatorSwap = (
       bounds.minTime !== "0" ||
       BigInt(bounds.maxTime) <= BigInt(now + 20) ||
       BigInt(bounds.maxTime) > BigInt(now + LIFI_MAX_LIFETIME_SECONDS) ||
-      resourceFeeStroops < 0n ||
-      resourceFeeStroops > feeStroops ||
       op.func.type !== "hostFunctionTypeInvokeContract"
     )
-      return fail("LI.FI expiry or resource fee");
+      return fail("LI.FI expiry");
     checkLifiSwap(
       op.func.invokeContract,
       op.auth ?? [],
