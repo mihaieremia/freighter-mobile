@@ -546,6 +546,53 @@ describe("balances duck", () => {
         ).toEqual(new BigNumber("8400"));
       });
 
+      it.each(["same", "account", "network", "request"])(
+        "applies a late catalog only to the matching refresh (%s)",
+        async (change) => {
+          seedCatalog(NETWORKS.PUBLIC);
+          let complete!: () => void;
+          const originalFetchCatalog =
+            useTokenCatalogStore.getState().fetchCatalog;
+          const fetchCatalog = jest
+            .spyOn(useTokenCatalogStore.getState(), "fetchCatalog")
+            .mockImplementationOnce(
+              () =>
+                new Promise<void>((resolve) => {
+                  complete = resolve;
+                }),
+            );
+          mockFetchBalances.mockResolvedValue({
+            balances: { [sorobanId]: sorobanBalance },
+          } as never);
+          (usePricesStore.getState as jest.Mock).mockReturnValue(
+            createMockPricesStore({}),
+          );
+          await useBalancesStore
+            .getState()
+            .fetchAccountBalances(mockParamsPubnet);
+          expect(useBalancesStore.getState().isLoading).toBe(false);
+          expect(
+            useBalancesStore.getState().pricedBalances[sorobanId].currentPrice,
+          ).toBeUndefined();
+          if (change !== "same") {
+            await useBalancesStore.getState().fetchAccountBalances({
+              ...mockParamsPubnet,
+              ...(change === "account" ? { publicKey: "another" } : {}),
+              ...(change === "network" ? { network: NETWORKS.TESTNET } : {}),
+            });
+          }
+          seedCatalog(NETWORKS.PUBLIC, catalogSoroban);
+          complete();
+          await Promise.resolve();
+          const price =
+            useBalancesStore.getState().pricedBalances[sorobanId].currentPrice;
+          if (change === "same") expect(price?.toString()).toBe("4200");
+          else expect(price).toBeUndefined();
+          fetchCatalog.mockRestore();
+          useTokenCatalogStore.setState({ fetchCatalog: originalFetchCatalog });
+        },
+      );
+
       it("does not price tokens on a network without fiat", async () => {
         seedCatalog(NETWORKS.TESTNET, catalogUsdc, catalogSoroban);
         mockFetchBalances.mockResolvedValueOnce({

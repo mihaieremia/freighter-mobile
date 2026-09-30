@@ -87,8 +87,8 @@ const mapSwapWithIcons = ({
     ? `+${formatTokenForDisplay(amount, destTokenCodeFinal)}`
     : `-${formatTokenForDisplay(operation.source_amount || "", srcTokenCode)}`;
   if (
-    operation.xoxnoReceipt &&
-    operation.xoxnoReceipt.sourceDecimals === undefined
+    operation.swapReceipt &&
+    operation.swapReceipt.sourceDecimals === undefined
   )
     formattedAmount = `-${operation.source_amount} ${baseUnits} ${srcTokenCode}`;
 
@@ -103,7 +103,9 @@ const mapSwapWithIcons = ({
     {
       assetCode: srcTokenCode,
       assetIssuer: sourceTokenIssuer || null,
-      decimals: operation.xoxnoReceipt?.sourceDecimals ?? DEFAULT_DECIMALS,
+      decimals: operation.swapReceipt
+        ? (operation.swapReceipt.sourceDecimals ?? 0)
+        : DEFAULT_DECIMALS,
       amount: operation.source_amount || "",
       isCredit: false,
       icon: sourceIcon,
@@ -137,7 +139,7 @@ const mapSwapWithIcons = ({
         // brings the catalog logo, used when the icon store has none
         image: isSourceNative ? logos.stellar : sourceIconUrl,
         token:
-          isSourceNative || operation.xoxnoReceipt
+          isSourceNative || operation.swapReceipt
             ? undefined
             : {
                 code: srcTokenCode,
@@ -156,7 +158,7 @@ const mapSwapWithIcons = ({
         // brings the catalog logo, used when the icon store has none
         image: isDestNative ? logos.stellar : destIconUrl,
         token:
-          isDestNative || operation.xoxnoReceipt
+          isDestNative || operation.swapReceipt
             ? undefined
             : {
                 code: destTokenCodeFinal,
@@ -174,7 +176,7 @@ const mapSwapWithIcons = ({
 
   const transactionDetails: TransactionDetails = {
     operation,
-    xoxnoReceipt: operation.xoxnoReceipt,
+    swapReceipt: operation.swapReceipt,
     transactionTitle: t("history.transactionHistory.swappedTwoTokens", {
       srcTokenCode,
       destTokenCode: destTokenCodeFinal,
@@ -197,7 +199,7 @@ const mapSwapWithIcons = ({
       sourceTokenType: operation.source_asset_type || "",
       destinationTokenType: operation.asset_type || "",
     },
-    assetDiffs: operation.xoxnoReceipt ? [] : assetDiffs,
+    assetDiffs,
   };
 
   return {
@@ -216,7 +218,7 @@ const mapSwapWithIcons = ({
   };
 };
 
-export const mapXoxnoSwapHistoryItem = (
+export const mapAggregatorSwapHistoryItem = (
   args: SwapHistoryItemData,
 ): HistoryItemData =>
   mapSwapWithIcons({

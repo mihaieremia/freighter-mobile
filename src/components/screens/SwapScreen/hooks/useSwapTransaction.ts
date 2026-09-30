@@ -737,12 +737,7 @@ export const useSwapTransaction = ({
         // settled amount has been read.
         const snapshot = snapshotHandle.resolve();
 
-        // The settled destination amount comes from the transaction itself,
-        // never the quote. Horizon's response carries the meta of a classic
-        // swap's result but not a Soroban swap's, which Stellar Expert may serve
-        // a few seconds late, so `swap.completed` is emitted by a continuation
-        // that nothing waits for: the status, balances and navigation below
-        // never sit behind that lookup.
+        // Receipt enrichment is detached; success, balances and navigation never await it.
         reportSettledSwap({
           outcome: submitOutcome,
           signedXDR,
@@ -820,37 +815,24 @@ export const useSwapTransaction = ({
           };
         }
 
+        // Record the failed attempt once, including quote expiry rejections.
+        analytics.trackTransactionError({
+          error: error instanceof Error ? error.message : String(error),
+          errorCode: reasonCode,
+          isSwap: true,
+          sourceToken: sourceBalance?.tokenCode,
+          destToken: destinationTokenInput?.tokenCode,
+          ...(isQuoteExpired
+            ? {}
+            : { sourceAmount, destAmount: pathResult?.destinationAmount }),
+          volume,
+        });
         if (isQuoteExpired) {
-          // Over-slippage / liquidity-changed rejection: fire the dedicated
-          // event alongside SWAP_FAIL (emitted just below — the pair is
-          // deliberate, see there) and prompt the user to retry for a fresh
-          // quote. `resultCode` carries the Horizon op code(s) that drove the
-          // expiry so we can slice by reason.
-          // Amounts intentionally dropped (parity with swap.completed/failed,
-          // which carry no amounts). Bare asset codes so from/to_asset_code match
-          // the extension.
           analytics.track(AnalyticsEvent.SWAP_QUOTE_EXPIRED, {
             from_asset_code: sourceBalance?.tokenCode,
             to_asset_code: destinationTokenInput?.tokenCode,
             result_code: quoteExpiredCodes.join(", "),
           });
-
-          // A quote expiry rejected at submit also counts as a failed swap for
-          // volume purposes: swap.quote_expired carries no volume, and without
-          // this, the failure that `failure_category` exists to measure never
-          // reaches a volume-bearing event. failure_category: "slippage" falls
-          // out of the same reason-code mapping used for every other
-          // rejection, so no special case is needed beyond emitting here too.
-          // Only swap.failed carries volume, so the pair cannot double-count.
-          analytics.trackTransactionError({
-            error: error instanceof Error ? error.message : String(error),
-            errorCode: reasonCode,
-            isSwap: true,
-            sourceToken: sourceBalance?.tokenCode,
-            destToken: destinationTokenInput?.tokenCode,
-            volume,
-          });
-
           if (!isCurrentTransaction()) return;
 
           showToast({
@@ -881,17 +863,6 @@ export const useSwapTransaction = ({
 
           return;
         }
-
-        analytics.trackTransactionError({
-          error: error instanceof Error ? error.message : String(error),
-          errorCode: reasonCode,
-          isSwap: true,
-          sourceToken: sourceBalance?.tokenCode,
-          destToken: destinationTokenInput?.tokenCode,
-          sourceAmount,
-          destAmount: pathResult?.destinationAmount,
-          volume,
-        });
 
         if (!isCurrentTransaction()) return;
 

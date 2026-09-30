@@ -24,7 +24,6 @@ import {
 import {
   SWAPPER,
   XAUM_CONTRACT,
-  usdcToXaumMeta,
 } from "../../../../__mocks__/routerSwapHistory";
 import {
   BACKEND_ENVELOPE,
@@ -102,9 +101,16 @@ jest.mock("ducks/prices", () => ({
 }));
 // Stubs the network boundary only — startConfirmationPriceSnapshot itself
 // runs for real, so its cancel()/resolve() contract is still exercised.
+const mockFetchSwapReceipt = jest.fn();
+const mockDecodeSwapEnvelope = jest.fn();
+jest.mock("@xoxno/stellar-swap", () => ({
+  ...jest.requireActual("@xoxno/stellar-swap"),
+  decodeSwapEnvelope: (...args: unknown[]) => mockDecodeSwapEnvelope(...args),
+}));
 const mockFetchTokenPrices = jest.fn().mockResolvedValue({});
 jest.mock("services/backend", () => ({
   ...jest.requireActual("services/backend"),
+  fetchSwapReceipt: (...args: unknown[]) => mockFetchSwapReceipt(...args),
   fetchTokenPrices: (...args: unknown[]) => mockFetchTokenPrices(...args),
   fetchSwapQuote: (...args: unknown[]) => mockFetchSwapQuote(...args),
 }));
@@ -201,13 +207,9 @@ const baseParams: Parameters<typeof useSwapTransaction>[0] = {
 };
 
 /** submitTransaction now resolves with the attempt's own outcome. */
-const submitOk = (
-  resultXdr: string | null = null,
-  resultMetaXdr: string | null = null,
-) => ({
+const submitOk = (resultXdr: string | null = null) => ({
   hash: "tx-hash",
   resultXdr,
-  resultMetaXdr,
   error: null,
   resultCodes: null,
   httpStatus: null,
@@ -224,7 +226,6 @@ const submitFailed = (
 ) => ({
   hash: null,
   resultXdr: null,
-  resultMetaXdr: null,
   error: "Submit error from store",
   resultCodes: null,
   httpStatus: null,
@@ -1610,6 +1611,11 @@ describe("useSwapTransaction", () => {
         };
 
         beforeEach(() => {
+          mockDecodeSwapEnvelope.mockReturnValue({ operationIndex: 0 });
+          mockFetchSwapReceipt.mockReset().mockResolvedValue({
+            status: "confirmed",
+            receivedAtoms: "1608622",
+          });
           mockFetchTransactionMeta.mockReset().mockResolvedValue(null);
           mockPricesByNetwork = {
             [NETWORKS.PUBLIC]: {
@@ -1622,9 +1628,9 @@ describe("useSwapTransaction", () => {
           mockFetchTokenPrices.mockRejectedValue(new Error("no prices"));
         });
 
-        it("reads it from the transfers in the submit response's meta, priced and compared with the quote", async () => {
+        it("reads actual backend receipt output, priced and compared with the quote", async () => {
           mockSubmitTransaction.mockResolvedValue(
-            submitOk(invokeResultXdr(true), usdcToXaumMeta),
+            submitOk(invokeResultXdr(true)),
           );
 
           await executeIntoXaum();
@@ -1640,7 +1646,8 @@ describe("useSwapTransaction", () => {
           expect(mockFetchTransactionMeta).not.toHaveBeenCalled();
         });
 
-        it("reports the leg as an error, with no amount, when neither the response nor Stellar Expert has the meta", async () => {
+        it("reports unavailable receipts without inventing an amount", async () => {
+          mockFetchSwapReceipt.mockResolvedValue({ status: "unavailable" });
           mockSubmitTransaction.mockResolvedValue(
             submitOk(invokeResultXdr(true)),
           );
@@ -1651,19 +1658,14 @@ describe("useSwapTransaction", () => {
           expect(volume).toMatchObject({ toAmountUsdStatus: "error" });
           expect(volume).not.toHaveProperty("toAmount");
           expect(volume).not.toHaveProperty("executionSlippagePct");
-          expect(mockFetchTransactionMeta).toHaveBeenCalledTimes(1);
-          expect(mockFetchTransactionMeta).toHaveBeenCalledWith(
-            "tx-hash",
-            NETWORKS.PUBLIC,
-            { retries: 2, initialDelay: 3000 },
-          );
+          expect(mockFetchSwapReceipt).toHaveBeenCalledTimes(1);
         });
 
-        it("finishes the swap without waiting for a slow Stellar Expert lookup", async () => {
-          let resolveMeta: (meta: string | null) => void = () => {};
-          mockFetchTransactionMeta.mockReturnValue(
-            new Promise<string | null>((resolve) => {
-              resolveMeta = resolve;
+        it("finishes the swap before a slow receipt request", async () => {
+          let resolveReceipt: (receipt: unknown) => void = () => {};
+          mockFetchSwapReceipt.mockReturnValue(
+            new Promise<unknown>((resolve) => {
+              resolveReceipt = resolve;
             }),
           );
           mockSubmitTransaction.mockResolvedValue(
@@ -1672,13 +1674,13 @@ describe("useSwapTransaction", () => {
 
           await executeIntoXaum();
 
-          // The user-visible flow is done while the lookup is still pending.
+          // Receipt enrichment outlives the user-visible flow.
           expect(mockAddBoughtTokenToBalances).toHaveBeenCalledTimes(1);
           expect(mockShowToast).not.toHaveBeenCalled();
           expect(mockTrackSwapSuccess).not.toHaveBeenCalled();
 
           await act(async () => {
-            resolveMeta(usdcToXaumMeta);
+            resolveReceipt({ status: "confirmed", receivedAtoms: "1608622" });
             await Promise.resolve();
           });
 
@@ -1694,7 +1696,7 @@ describe("useSwapTransaction", () => {
           };
           seedCatalog(NETWORKS.PUBLIC, catalogXaum({ priceUsd: 4000 }));
           mockSubmitTransaction.mockResolvedValue(
-            submitOk(invokeResultXdr(true), usdcToXaumMeta),
+            submitOk(invokeResultXdr(true)),
           );
 
           await executeIntoXaum();
@@ -1710,7 +1712,7 @@ describe("useSwapTransaction", () => {
         it("keeps the prices store ahead of the catalog", async () => {
           seedCatalog(NETWORKS.PUBLIC, catalogXaum({ priceUsd: 1 }));
           mockSubmitTransaction.mockResolvedValue(
-            submitOk(invokeResultXdr(true), usdcToXaumMeta),
+            submitOk(invokeResultXdr(true)),
           );
 
           await executeIntoXaum();
@@ -1722,7 +1724,7 @@ describe("useSwapTransaction", () => {
           mockPricesByNetwork = {};
           seedCatalog(NETWORKS.TESTNET, catalogXaum({ priceUsd: 4000 }));
           mockSubmitTransaction.mockResolvedValue(
-            submitOk(invokeResultXdr(true), usdcToXaumMeta),
+            submitOk(invokeResultXdr(true)),
           );
 
           await executeIntoXaum({ network: NETWORKS.TESTNET });
@@ -1732,24 +1734,10 @@ describe("useSwapTransaction", () => {
           expect(volume).not.toHaveProperty("toAmountUsdRate");
         });
 
-        it("asks Stellar Expert once for the meta the response left out", async () => {
-          mockFetchTransactionMeta.mockResolvedValue(usdcToXaumMeta);
+        it("keeps success when the receipt request fails", async () => {
+          mockFetchSwapReceipt.mockRejectedValue(new Error("unavailable"));
           mockSubmitTransaction.mockResolvedValue(
             submitOk(invokeResultXdr(true)),
-          );
-
-          await executeIntoXaum();
-
-          expect(reportedVolume()).toMatchObject({
-            toAmount: Number(XAUM_AMOUNT),
-            toAmountUsdStatus: "ok",
-          });
-          expect(mockFetchTransactionMeta).toHaveBeenCalledTimes(1);
-        });
-
-        it("reports an error, without another lookup, when the meta holds no transfer to the account", async () => {
-          mockSubmitTransaction.mockResolvedValue(
-            submitOk(invokeResultXdr(true), "not-xdr"),
           );
 
           await executeIntoXaum();
@@ -1762,7 +1750,7 @@ describe("useSwapTransaction", () => {
 
         it("reads nothing from a result that is not a success", async () => {
           mockSubmitTransaction.mockResolvedValue(
-            submitOk(invokeResultXdr(false), usdcToXaumMeta),
+            submitOk(invokeResultXdr(false)),
           );
 
           await executeIntoXaum();

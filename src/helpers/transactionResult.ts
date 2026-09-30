@@ -9,9 +9,6 @@ import BigNumber from "bignumber.js";
 import { logger } from "config/logger";
 import { stroopToXlm } from "helpers/formatAmount";
 
-const TRANSFER_EVENT_SYMBOL = "transfer";
-/** Topics of a token transfer event: symbol, from, to (a SAC adds the asset). */
-const TRANSFER_EVENT_MIN_TOPICS = 3;
 const ERROR_EVENT_SYMBOL = "error";
 /** Topics of a host `error` diagnostic event: the symbol, then the error. */
 const ERROR_EVENT_MIN_TOPICS = 2;
@@ -116,21 +113,6 @@ export const getSettledPathPaymentStrictSendAmount = (
   }
 };
 
-/**
- * The contract events of a transaction meta: a v3 meta keeps them on its
- * Soroban meta, a v4 meta on each operation.
- */
-const contractEventsOf = (meta: xdr.TransactionMeta): xdr.ContractEvent[] => {
-  switch (meta.type) {
-    case "v3":
-      return meta.v3.sorobanMeta?.events ?? [];
-    case "v4":
-      return meta.v4.operations.flatMap((operation) => operation.events);
-    default:
-      return [];
-  }
-};
-
 /** Whether `contractId` emitted the event, and its first topic is the given symbol. */
 const isEventOf = (
   event: xdr.ContractEvent,
@@ -145,77 +127,6 @@ const isEventOf = (
     topic?.type === "scvSymbol" &&
     scValToNative(topic) === symbol
   );
-};
-
-/**
- * The amount a `transfer` event pays to the viewer, in the token's base units;
- * 0 for any other event. The event data is a bare i128 or a map with an
- * `amount` key.
- */
-const transferAmountToViewer = (
-  event: xdr.ContractEvent,
-  tokenContractId: string,
-  viewerPublicKey: string,
-): bigint => {
-  if (!isEventOf(event, tokenContractId, TRANSFER_EVENT_SYMBOL)) {
-    return 0n;
-  }
-
-  const { topics, data } = event.body.v0;
-  if (
-    topics.length < TRANSFER_EVENT_MIN_TOPICS ||
-    topics[2].type !== "scvAddress" ||
-    scValToNative(topics[2]) !== viewerPublicKey
-  ) {
-    return 0n;
-  }
-
-  const payload: unknown = scValToNative(data);
-  const amount =
-    typeof payload === "object" && payload !== null && "amount" in payload
-      ? payload.amount
-      : payload;
-
-  return typeof amount === "bigint" && amount > 0n ? amount : 0n;
-};
-
-/**
- * The amount of a Soroban token the viewer received in a transaction, in the
- * token's base units: the sum of the token's `transfer` events to the viewer
- * in the transaction meta (a plain Soroban token has no balance change to read
- * instead).
- *
- * Returns `null` when the meta cannot be decoded or holds no such transfer.
- * This never throws, so a telemetry or history caller can treat `null` as
- * "not observed".
- *
- * @param metaXdr - The base64 `TransactionMeta` XDR
- * @param tokenContractId - The contract that emitted the transfers
- * @param viewerPublicKey - The account that received the tokens
- */
-export const getReceivedTokenAmountFromMeta = (
-  metaXdr: string,
-  tokenContractId: string,
-  viewerPublicKey: string,
-): bigint | null => {
-  try {
-    const meta = xdr.TransactionMeta.fromXDR(metaXdr, "base64");
-    const received = contractEventsOf(meta).reduce(
-      (total, event) =>
-        total + transferAmountToViewer(event, tokenContractId, viewerPublicKey),
-      0n,
-    );
-
-    return received === 0n ? null : received;
-  } catch (error) {
-    logger.error(
-      "transactionResult",
-      "Failed to read the transaction events",
-      error,
-    );
-
-    return null;
-  }
 };
 
 /**
@@ -245,19 +156,7 @@ const isRouterSlippageEvent = (
   );
 };
 
-/**
- * Whether the meta of a failed transaction shows the XOXNO router rejecting the
- * swap for slippage: a diagnostic `error` event that the router itself emitted,
- * carrying its `SlippageExceeded` contract error. Only a v4 meta is read (its
- * diagnostic events are the failure's trace); any other version is unknown and
- * reads as `false`.
- *
- * Never throws: a meta that cannot be decoded reads as `false`, so a caller
- * treats "not slippage" and "cannot tell" alike and keeps its generic failure.
- *
- * @param metaXdr - The base64 `TransactionMeta` XDR of the failed transaction
- * @param routerContractId - The router contract of the network
- */
+/** Only v4 router-emitted SlippageExceeded diagnostics classify failure; malformed metadata returns false. */
 export const isRouterSlippageFailure = (
   metaXdr: string,
   routerContractId: string,

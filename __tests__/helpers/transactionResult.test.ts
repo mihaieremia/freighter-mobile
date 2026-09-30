@@ -1,19 +1,15 @@
 /* eslint-disable @fnando/consistent-import/consistent-import */
 import {
   Account,
-  Address,
   Asset,
   Keypair,
   Networks,
   Operation,
-  StrKey,
   TransactionBuilder,
-  nativeToScVal,
   xdr,
 } from "@stellar/stellar-sdk";
 import {
   findPathPaymentStrictSendIndex,
-  getReceivedTokenAmountFromMeta,
   getSettledPathPaymentStrictSendAmount,
   isRouterSlippageFailure,
   isTransactionResultSuccess,
@@ -26,16 +22,7 @@ import {
   withDiagnosticEvents,
   withErrorTopic,
 } from "../../__mocks__/routerFailedSwap";
-import {
-  OTHER_ACCOUNT,
-  ROUTER,
-  SWAPPER,
-  XAUM_CONTRACT,
-  asV3,
-  realV4,
-  usdcToXaumMeta,
-  withLastEvent,
-} from "../../__mocks__/routerSwapHistory";
+import { ROUTER, XAUM_CONTRACT } from "../../__mocks__/routerSwapHistory";
 
 /** The result of a pathPaymentStrictSend that settled `stroops` of the destination asset. */
 const pathPaymentOk = (stroops: string) =>
@@ -200,105 +187,6 @@ describe("findPathPaymentStrictSendIndex", () => {
       .build();
 
     expect(findPathPaymentStrictSendIndex(tx)).toBe(-1);
-  });
-});
-
-describe("getReceivedTokenAmountFromMeta", () => {
-  // usdcToXaumMeta: a real mainnet v4 meta whose last event is the XAUM
-  // transfer of 1608622 base units from the router to the swapper.
-  const RECEIVED = 1608622n;
-
-  it("reads the amount the viewer received from a real v4 meta", () => {
-    expect(
-      getReceivedTokenAmountFromMeta(usdcToXaumMeta, XAUM_CONTRACT, SWAPPER),
-    ).toBe(RECEIVED);
-  });
-
-  it("reads a v3 meta from its Soroban meta events", () => {
-    expect(getReceivedTokenAmountFromMeta(asV3(), XAUM_CONTRACT, SWAPPER)).toBe(
-      RECEIVED,
-    );
-  });
-
-  it("reads event data that is a bare i128", () => {
-    const meta = withLastEvent((event) => ({
-      ...event,
-      body: {
-        ...event.body,
-        v0: {
-          ...event.body.v0,
-          data: nativeToScVal(RECEIVED, { type: "i128" }).toXdrObject(),
-        },
-      },
-    }));
-
-    expect(getReceivedTokenAmountFromMeta(meta, XAUM_CONTRACT, SWAPPER)).toBe(
-      RECEIVED,
-    );
-  });
-
-  it("sums every transfer of the token to the viewer", () => {
-    const v4 = realV4();
-    const [{ events }] = v4.operations;
-    events.push(events[events.length - 1]);
-    const meta = xdr.TransactionMeta.fromXdrObject({ v: 4, v4 }).toXDR(
-      "base64",
-    );
-
-    expect(getReceivedTokenAmountFromMeta(meta, XAUM_CONTRACT, SWAPPER)).toBe(
-      RECEIVED * 2n,
-    );
-  });
-
-  it("is null for a transfer to another recipient", () => {
-    const meta = withLastEvent((event) => ({
-      ...event,
-      body: {
-        ...event.body,
-        v0: {
-          ...event.body.v0,
-          topics: [
-            event.body.v0.topics[0],
-            event.body.v0.topics[1],
-            new Address(OTHER_ACCOUNT).toScVal().toXdrObject(),
-          ],
-        },
-      },
-    }));
-
-    expect(
-      getReceivedTokenAmountFromMeta(meta, XAUM_CONTRACT, SWAPPER),
-    ).toBeNull();
-  });
-
-  it("is null when another token contract emitted the transfer", () => {
-    const meta = withLastEvent((event) => ({
-      ...event,
-      contractId: StrKey.decodeContract(ROUTER),
-    }));
-
-    expect(
-      getReceivedTokenAmountFromMeta(meta, XAUM_CONTRACT, SWAPPER),
-    ).toBeNull();
-  });
-
-  it("is null when the viewer is not the account that received", () => {
-    expect(
-      getReceivedTokenAmountFromMeta(
-        usdcToXaumMeta,
-        XAUM_CONTRACT,
-        OTHER_ACCOUNT,
-      ),
-    ).toBeNull();
-  });
-
-  it("is null, not a throw, for malformed XDR", () => {
-    expect(
-      getReceivedTokenAmountFromMeta("not-xdr", XAUM_CONTRACT, SWAPPER),
-    ).toBeNull();
-    expect(
-      getReceivedTokenAmountFromMeta("", XAUM_CONTRACT, SWAPPER),
-    ).toBeNull();
   });
 });
 

@@ -5,16 +5,7 @@ import { SwapInputSide, SwapPathResult } from "ducks/swap";
 import useAppTranslation from "hooks/useAppTranslation";
 import { useMemo } from "react";
 
-/**
- * CTA state-machine.
- *
- *   select       either side empty  ──► navigate to the missing picker
- *   enter        sides set, amount == 0  ──► focus the Sell input
- *                (the amount is the one typed in the card the user last used)
- *   insufficient amount exceeds spendable  ──► disabled
- *   loading      path-finding in flight  ──► spinner
- *   review       path resolved, amount valid  ──► open Review sheet
- */
+/** Select missing token, enter amount, check funds, await quote, then review. */
 export type SwapCtaState =
   | { kind: "select"; missingSide: "source" | "destination" }
   | { kind: "enter" }

@@ -70,11 +70,6 @@ export interface SubmitTransactionOutcome {
   hash: string | null;
   /** Horizon `result_xdr` from a successful submit. */
   resultXdr: string | null;
-  /**
-   * Horizon `result_meta_xdr` from a successful submit, when the response
-   * carries it. A Soroban transaction's contract events live here.
-   */
-  resultMetaXdr: string | null;
   /** Error message when the submit failed. */
   error: string | null;
   /** Horizon `result_codes` from a 4xx protocol rejection. */
@@ -88,7 +83,6 @@ export interface SubmitTransactionOutcome {
 const FAILED_SUBMIT_OUTCOME: SubmitTransactionOutcome = {
   hash: null,
   resultXdr: null,
-  resultMetaXdr: null,
   error: null,
   resultCodes: null,
   httpStatus: null,
@@ -750,11 +744,7 @@ export const useTransactionBuilderStore = create<TransactionBuilderState>(
           network: params.network,
         });
 
-        const {
-          hash,
-          result_xdr: resultXdr,
-          result_meta_xdr: resultMetaXdr,
-        } = result;
+        const { hash, result_xdr: resultXdr } = result;
 
         // Only update with success if this submit is still the latest one.
         // Guards against late responses from previous submits showing wrong hash.
@@ -773,7 +763,6 @@ export const useTransactionBuilderStore = create<TransactionBuilderState>(
           ...FAILED_SUBMIT_OUTCOME,
           hash,
           resultXdr: resultXdr ?? null,
-          resultMetaXdr: resultMetaXdr ?? null,
         };
       } catch (error) {
         const errorMessage = extractErrorMessage(error);
@@ -863,7 +852,6 @@ export const useTransactionBuilderStore = create<TransactionBuilderState>(
         return {
           hash: null,
           resultXdr: null,
-          resultMetaXdr: null,
           error: errorMessage,
           resultCodes:
             (horizon4xxResultCodes as SubmitResultCodes | undefined) ?? null,

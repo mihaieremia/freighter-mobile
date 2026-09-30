@@ -1,16 +1,15 @@
 import { TransactionBuilder } from "@stellar/stellar-sdk";
+import { decodeSwapEnvelope, getSwapRouter } from "@xoxno/stellar-swap";
 import BigNumber from "bignumber.js";
 import { NETWORKS, mapNetworkToNetworkDetails } from "config/constants";
 import { logger } from "config/logger";
 import { PricedBalance } from "config/types";
-import { XOXNO_SWAP_ROUTER } from "config/xoxnoSwap";
 import { SubmitTransactionOutcome } from "ducks/transactionBuilder";
 import { ConfirmationPriceSnapshot } from "helpers/confirmationPriceSnapshot";
 import { getBalanceDecimals } from "helpers/formatAmount";
 import { swapContractId } from "helpers/swapAssets";
 import {
   findPathPaymentStrictSendIndex,
-  getReceivedTokenAmountFromMeta,
   getSettledPathPaymentStrictSendAmount,
   isRouterSlippageFailure,
   isTransactionResultSuccess,
@@ -23,15 +22,8 @@ import {
   deriveLegUsd,
 } from "helpers/usdVolume";
 import { analytics } from "services/analytics";
+import { fetchSwapReceipt } from "services/backend";
 import { fetchTransactionMeta } from "services/stellarExpert";
-
-/**
- * Stellar Expert may not have indexed a transaction the moment it is
- * submitted, so a settled swap's meta is asked for up to three times in all, the
- * waits doubling from three seconds, before the amount is reported as not
- * readable.
- */
-const SETTLED_META_RETRY = { retries: 2, initialDelay: 3000 };
 
 /**
  * A rejected router swap's meta is asked for twice, two seconds apart, and the
@@ -47,21 +39,7 @@ const TX_FAILED_CODE = "tx_failed";
 /** Horizon's operation result code for a Soroban call that trapped. */
 const FUNCTION_TRAPPED_CODE = "function_trapped";
 
-/**
- * Reads the settled destination amount of a submitted swap, in whole units,
- * from the transaction itself, never the quote.
- *
- * A classic swap reads it from its `pathPaymentStrictSend` result. An
- * aggregator swap (an `invokeHostFunction`, so no path payment) reads it from
- * the transfers of the destination token to the account in the transaction
- * meta. The submit response's meta is decoded at once; when the response
- * carries none (Horizon leaves it out for Soroban transactions), Stellar Expert
- * is asked for it, up to three times, waiting three and then six seconds, for
- * indexing lag.
- * Returns `null` when the amount cannot be read (the transaction did not
- * succeed, no meta, unparseable XDR); it never throws, so the caller reports
- * the leg as `error` rather than failing the swap.
- */
+/** Actual confirmed output; enrichment failures never fail a successful swap. */
 const readSettledDestinationAmount = async ({
   outcome,
   signedXDR,
@@ -93,26 +71,27 @@ const readSettledDestinationAmount = async ({
       return null;
     }
 
-    const metaXdr =
-      outcome.resultMetaXdr ??
-      (outcome.hash
-        ? await fetchTransactionMeta(outcome.hash, network, SETTLED_META_RETRY)
-        : null);
-    if (!metaXdr) {
-      return null;
-    }
-
-    const received = getReceivedTokenAmountFromMeta(
-      metaXdr,
+    if (!outcome.hash) return null;
+    const call = decodeSwapEnvelope({
+      envelopeXdr: signedXDR,
+      networkPassphrase,
+      viewer: publicKey,
+    });
+    if (!call) return null;
+    const receipt = await fetchSwapReceipt(
+      {
+        network,
+        transactionHash: outcome.hash,
+        viewer: publicKey,
+        operationIndex: call.operationIndex,
+      },
       swapContractId(destination, networkPassphrase),
-      publicKey,
     );
-
-    return received === null
-      ? null
-      : new BigNumber(received.toString()).shiftedBy(
+    return receipt.status === "confirmed" && receipt.receivedAtoms
+      ? new BigNumber(receipt.receivedAtoms).shiftedBy(
           -getBalanceDecimals(destination),
-        );
+        )
+      : null;
   } catch (error) {
     logger.error(
       "SwapSettlement",
@@ -158,18 +137,7 @@ const fetchFailedMeta = (
   ]).finally(() => clearTimeout(timer));
 };
 
-/**
- * Whether a rejected router swap was rejected for slippage: the router's own
- * `SlippageExceeded` contract error. Horizon reports every trapped Soroban call
- * as `function_trapped`, so the reason is only in the failed transaction's
- * diagnostic events, which Stellar Expert serves.
- *
- * The cheap gate needs no network: only a `400 tx_failed` with a
- * `function_trapped` operation on a network with a router qualifies. Only then
- * is the meta fetched, at most `SLIPPAGE_LOOKUP_BUDGET_MS` of waiting in all.
- * Never throws: any doubt (no meta, undecodable meta, another error or
- * contract) is `false`, and the caller keeps its generic failure.
- */
+/** Only a 400 tx_failed/function_trapped triggers bounded router-specific diagnostic lookup. */
 export const isAggregatorSlippageRejection = async ({
   outcome,
   signedXDR,
@@ -179,7 +147,10 @@ export const isAggregatorSlippageRejection = async ({
   signedXDR: string;
   network: NETWORKS;
 }): Promise<boolean> => {
-  const routerContractId = XOXNO_SWAP_ROUTER[network];
+  const routerContractId = getSwapRouter(
+    mapNetworkToNetworkDetails(network).networkPassphrase,
+    "xoxno",
+  );
   if (!routerContractId || !isTrappedSorobanRejection(outcome)) {
     return false;
   }

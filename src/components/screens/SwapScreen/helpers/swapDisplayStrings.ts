@@ -64,20 +64,7 @@ export const buildDestinationPickerToken = ({
   return undefined;
 };
 
-/**
- * Sell-card right-aligned available-balance text. Returns "" when no source
- * balance is selected so the caller can render null instead of an empty
- * label.
- *
- * `formatTokenForDisplay` already produces "<amount> <code>" — don't append
- * the code a second time (caused the "123.45 USDC USDC" double-code bug).
- * `spendableAmount` is already a decimal token amount, so it is formatted as
- * is; `formatBalanceAmount` would scale a Soroban token's amount by its
- * decimals a second time.
- * The trailing " available" suffix matches the Send card's wording for
- * cross-flow consistency; pass the resolved i18n string in via
- * `availableLabel` so this helper stays pure.
- */
+/** spendableAmount is already scaled; formatting as a raw balance would scale it twice. */
 export const buildSourceBalanceRight = ({
   sourceBalance,
   sourceTokenSymbol,

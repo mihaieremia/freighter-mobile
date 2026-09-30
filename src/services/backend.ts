@@ -1572,12 +1572,18 @@ export interface SwapReceiptResponse extends SwapReceiptIdentity {
   receivedAtoms?: string;
 }
 
-/** Receipt identity and integer validation are mandatory before display. */
+const confirmedSwapReceipts = new Map<string, SwapReceiptResponse>();
+
+/** Cache only confirmed, identity-checked receipts. Cancellation belongs to each caller. */
 export const fetchSwapReceipt = async (
   identity: SwapReceiptIdentity,
   tokenOut: string,
   signal?: AbortSignal,
 ): Promise<SwapReceiptResponse> => {
+  if (signal?.aborted) throw new Error("Receipt request canceled");
+  const key = `${identity.network}:${identity.transactionHash}:${identity.operationIndex}:${identity.viewer}`;
+  const cached = confirmedSwapReceipts.get(key);
+  if (cached?.tokenOut === tokenOut) return cached;
   const { data: response } = await freighterBackendV2.get<{
     data: SwapReceiptResponse;
   }>(`/swap/receipt/${identity.transactionHash}`, {
@@ -1609,5 +1615,10 @@ export const fetchSwapReceipt = async (
       ))
   )
     throw new Error("Invalid confirmed swap receipt");
+  if (data.status === "confirmed" && !signal?.aborted) {
+    if (!confirmedSwapReceipts.has(key) && confirmedSwapReceipts.size >= 100)
+      confirmedSwapReceipts.delete(confirmedSwapReceipts.keys().next().value!);
+    confirmedSwapReceipts.set(key, data);
+  }
   return data;
 };

@@ -8,7 +8,7 @@ import {
 } from "@stellar/stellar-sdk";
 import {
   mapHistoryItemData,
-  mapInstantXoxnoHistoryItem,
+  mapInstantAggregatorHistoryItem,
 } from "components/screens/HistoryScreen/mappers";
 import {
   NETWORKS,
@@ -18,7 +18,7 @@ import {
 import { useTokenCatalogStore } from "ducks/tokenCatalog";
 import {
   getHistoryOperationIndex,
-  toXoxnoSwapOperation,
+  toAggregatorSwapOperation,
 } from "helpers/aggregatorSwapHistory";
 import { processAssetBalanceChanges } from "helpers/assetBalanceChanges";
 import { getIconUrl } from "helpers/getIconUrl";
@@ -51,7 +51,7 @@ const swapOf = (
   operation: Horizon.ServerApi.OperationRecord,
   publicKey = SWAPPER,
 ) =>
-  toXoxnoSwapOperation({
+  toAggregatorSwapOperation({
     operation,
     publicKey,
     networkDetails: PUBLIC_NETWORK_DETAILS,
@@ -73,7 +73,7 @@ it("decodes cached source/pair synchronously without any per-row enrichment", ()
   expect(result).toMatchObject({
     amount: "",
     asset_code: "XAUM",
-    xoxnoReceipt: {
+    swapReceipt: {
       operationIndex: 0,
       tokenOut: XAUM_CONTRACT,
       destinationDecimals: 9,
@@ -93,7 +93,7 @@ it("keeps unlisted contracts and raw input atoms instead of guessing seven decim
     asset_code: POOL_TOKEN_OUT,
     source_amount: "1729274",
     amount: "",
-    xoxnoReceipt: { sourceDecimals: undefined, destinationDecimals: undefined },
+    swapReceipt: { sourceDecimals: undefined, destinationDecimals: undefined },
   });
 });
 
@@ -121,7 +121,7 @@ it("rejects another viewer/router/network and failed transactions", () => {
     } as unknown as Horizon.ServerApi.OperationRecord),
   ).toBeNull();
   expect(
-    toXoxnoSwapOperation({
+    toAggregatorSwapOperation({
       operation: xlmToUsdt0,
       publicKey: SWAPPER,
       networkDetails: TESTNET_NETWORK_DETAILS,
@@ -202,7 +202,7 @@ it("never guesses operation zero in a multi-operation envelope", () => {
       ...operation,
       operation_index: 1,
     } as unknown as Horizon.ServerApi.OperationRecord),
-  ).toMatchObject({ xoxnoReceipt: { operationIndex: 1 } });
+  ).toMatchObject({ swapReceipt: { operationIndex: 1 } });
   expect(
     swapOf({
       ...operation,
@@ -235,7 +235,7 @@ it("selects the same inner operation in a fee-bump envelope", () => {
   expect(swapOf(operation)).toMatchObject({
     source_amount: "10",
     source_asset_code: "XLM",
-    xoxnoReceipt: { operationIndex: 0 },
+    swapReceipt: { operationIndex: 0 },
   });
 });
 
@@ -248,11 +248,11 @@ it("recognizes XOXNO before generic async asset diffs or icon mapping", async ()
     network: NETWORKS.PUBLIC,
     themeColors: { foreground: { primary: "black" } } as ThemeColors,
   };
-  const instant = mapInstantXoxnoHistoryItem(args);
+  const instant = mapInstantAggregatorHistoryItem(args);
   expect(instant).not.toBeNull();
   expect(instant).not.toBeInstanceOf(Promise);
   expect(
-    (await mapHistoryItemData(args)).transactionDetails.xoxnoReceipt
+    (await mapHistoryItemData(args)).transactionDetails.swapReceipt
       ?.operationIndex,
   ).toBe(0);
   expect(processAssetBalanceChanges).not.toHaveBeenCalled();

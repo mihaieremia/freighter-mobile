@@ -23,7 +23,7 @@ const details = (overrides = {}): TransactionDetails =>
   ({
     transactionType: TransactionType.SWAP,
     status: TransactionStatus.SUCCESS,
-    xoxnoReceipt: {
+    swapReceipt: {
       network: NETWORKS.PUBLIC,
       transactionHash: `receipt-test-${++transaction}`,
       viewer: "viewer",
@@ -47,7 +47,7 @@ const details = (overrides = {}): TransactionDetails =>
     },
   }) as TransactionDetails;
 const confirmed = (item: TransactionDetails) => ({
-  ...item.xoxnoReceipt!,
+  ...item.swapReceipt!,
   status: "confirmed" as const,
   receivedAtoms: "123456789012345678901234567",
 });
@@ -57,7 +57,7 @@ beforeEach(() => {
   tokenDetails.mockResolvedValue(null);
 });
 
-it("makes no request until an item opens; confirms exact atoms and reuses confirmed cache", async () => {
+it("makes no request until an item opens; confirms exact atoms and delegates receipt loading to the shared client", async () => {
   const item = details();
   fetchReceipt.mockResolvedValue(confirmed(item));
   const { result, rerender } = renderHook(
@@ -73,16 +73,13 @@ it("makes no request until an item opens; confirms exact atoms and reuses confir
   expect(result.current.details?.swapDetails?.destinationAmount).toBe(
     "123456789012345678.901234567",
   );
-  rerender({ item: null });
-  rerender({ item });
-  await waitFor(() => expect(result.current.status).toBe("confirmed"));
   expect(fetchReceipt).toHaveBeenCalledTimes(1);
 });
 
 it("keeps success when unavailable, retries only on demand, and never renders zero", async () => {
   const item = details();
   fetchReceipt.mockResolvedValue({
-    ...item.xoxnoReceipt!,
+    ...item.swapReceipt!,
     status: "unavailable",
   });
   const { result, rerender } = renderHook(() =>
@@ -111,7 +108,7 @@ it.each(["close", "viewer", "network", "item"])(
         }),
     );
     fetchReceipt.mockResolvedValue({
-      ...item.xoxnoReceipt!,
+      ...item.swapReceipt!,
       status: "unavailable",
     });
     const initial = {
@@ -153,7 +150,7 @@ it("keeps unknown decimal amounts as atoms; metadata is attempted only in the mo
   );
   await waitFor(() => expect(result.current.status).toBe("confirmed"));
   expect(
-    result.current.details?.xoxnoReceipt?.destinationDecimals,
+    result.current.details?.swapReceipt?.destinationDecimals,
   ).toBeUndefined();
   expect(result.current.details?.swapDetails?.destinationAmount).toBe(
     "123456789012345678901234567",

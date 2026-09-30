@@ -15,16 +15,7 @@ import { TokenCatalogEntry } from "services/backend";
 /** Where XOXNO serves a token's logo, by contract id. */
 const TOKEN_LOGO_BASE_URL = "https://media.xoxno.com/tokens";
 
-/**
- * The contract id the catalog knows a token by: XLM's and a classic asset's
- * Stellar Asset Contract (derived from the network passphrase), or a Soroban
- * token's own contract. Takes a token identifier ("XLM", "CODE:ISSUER",
- * "SYMBOL:CONTRACT") or a bare contract id. Returns undefined when the input
- * names no token, such as a liquidity pool id.
- *
- * @param tokenId - The token identifier
- * @param networkPassphrase - The passphrase of the network the token lives on
- */
+/** Resolve native/classic SAC from this network; custom tokens already carry their contract ID. */
 export const getCatalogContractId = (
   tokenId: TokenIdentifier,
   networkPassphrase: string,
@@ -100,16 +91,7 @@ export const getCatalogPriceFor = (
 ): BigNumber | undefined =>
   getCatalogPrice(getCatalogEntry(byContractId, tokenId, networkPassphrase));
 
-/**
- * Fills the USD price of held tokens that have none from the catalog. A price
- * already on the balance always wins; the catalog only fills a missing (null,
- * undefined or zero) one. The 24h change stays as it is, since the catalog has
- * none. Display data only.
- *
- * @param pricedBalances - The balances, keyed by token identifier
- * @param byContractId - One network's catalog, keyed by contract id
- * @param networkPassphrase - The passphrase of that network
- */
+/** Fill missing prices only. Preserve explicit token decimals and existing nonzero prices. */
 export const fillMissingPricesFromCatalog = (
   pricedBalances: PricedBalanceMap,
   byContractId: Record<string, TokenCatalogEntry> | undefined,
@@ -140,16 +122,7 @@ export const fillMissingPricesFromCatalog = (
   );
 };
 
-/**
- * A prices map with the catalog's USD price added for the given tokens the map
- * has none for (see `pickPrice`). Returns the same map when nothing was added,
- * and always on a non-mainnet network (fiat is mainnet-only).
- *
- * @param prices - The prices map to start from
- * @param tokenIds - The tokens to fill from the catalog when the map lacks them
- * @param byContractId - One network's catalog, keyed by contract id
- * @param network - The active network
- */
+/** Fill missing catalog prices, preserving the original map when unchanged. */
 export const withCatalogPrices = (
   prices: TokenPricesMap,
   tokenIds: Array<TokenIdentifier | undefined>,

@@ -93,7 +93,7 @@
     "@walletconnect/react-native-compat": "2.23.1",
     "@walletconnect/types": "2.23.1",
     "@walletconnect/utils": "2.23.1",
-    "@xoxno/sdk-js": "1.0.224",
+    "@xoxno/stellar-swap": "https://github.com/XOXNO/sdk-js/releases/download/stellar-swap-v0.1.0/xoxno-stellar-swap-0.1.0.tgz",
     "asyncstorage-down": "4.2.0",
     "axios": "1.13.2",
     "bignumber.js": "9.1.2",

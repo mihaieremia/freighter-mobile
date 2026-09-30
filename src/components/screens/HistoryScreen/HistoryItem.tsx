@@ -10,7 +10,7 @@ import {
 } from "components/screens/HistoryScreen/helpers";
 import {
   mapHistoryItemData,
-  mapInstantXoxnoHistoryItem,
+  mapInstantAggregatorHistoryItem,
 } from "components/screens/HistoryScreen/mappers";
 import { Text } from "components/sds/Typography";
 import { DEFAULT_PRESS_DELAY } from "config/constants";
@@ -35,7 +35,7 @@ const HistoryItem: React.FC<HistoryItemProps> = ({
 
   const instantItem = useMemo(
     () =>
-      mapInstantXoxnoHistoryItem({
+      mapInstantAggregatorHistoryItem({
         operation,
         accountBalances,
         publicKey,

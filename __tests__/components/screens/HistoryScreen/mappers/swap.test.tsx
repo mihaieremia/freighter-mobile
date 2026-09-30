@@ -1,7 +1,7 @@
 import { logos } from "assets/logos";
 import {
   mapSwapHistoryItem,
-  mapXoxnoSwapHistoryItem,
+  mapAggregatorSwapHistoryItem,
 } from "components/screens/HistoryScreen/mappers/swap";
 import { NETWORKS } from "config/constants";
 import { getIconUrl } from "helpers/getIconUrl";
@@ -156,7 +156,7 @@ describe("mapSwapHistoryItem - nativeness detection from operation type", () => 
 
 it("maps raw XOXNO input instantly with base units and cached icons only", () => {
   mockGetIconUrl.mockClear();
-  const result = mapXoxnoSwapHistoryItem(
+  const result = mapAggregatorSwapHistoryItem(
     buildSwapArgs({
       amount: "",
       source_amount: "123456789012345678901234567",
@@ -167,7 +167,7 @@ it("maps raw XOXNO input instantly with base units and cached icons only", () =>
       asset_issuer: "OUTPUT_CONTRACT",
       asset_type: "custom_token",
       source_icon_url: "https://cached.example/input.png",
-      xoxnoReceipt: { sourceDecimals: undefined },
+      swapReceipt: { sourceDecimals: undefined },
     }),
   );
   expect(result.amountText).toContain("123456789012345678901234567");

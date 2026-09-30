@@ -22,10 +22,7 @@ export {
   getQuoteExpiredOperationCodes,
   isQuoteExpiredResultCodes,
 } from "./quoteErrors";
-export {
-  isAggregatorQuoteSource,
-  isStaleAggregatorQuote,
-} from "./swapAggregator";
+export { isAggregatorQuoteSource, isStaleAggregatorQuote } from "ducks/swap";
 export { addBoughtTokenToBalances } from "./swapInventory";
 export {
   isAggregatorSlippageRejection,

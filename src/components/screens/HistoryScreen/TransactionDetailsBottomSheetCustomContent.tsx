@@ -121,9 +121,9 @@ export const TransactionDetailsBottomSheetCustomContent: React.FC<
   const hasSwapAmounts =
     !!transactionDetails.swapDetails?.sourceAmount &&
     !!transactionDetails.swapDetails?.destinationAmount &&
-    (!transactionDetails.xoxnoReceipt ||
-      (transactionDetails.xoxnoReceipt.sourceDecimals !== undefined &&
-        transactionDetails.xoxnoReceipt.destinationDecimals !== undefined));
+    (!transactionDetails.swapReceipt ||
+      (transactionDetails.swapReceipt.sourceDecimals !== undefined &&
+        transactionDetails.swapReceipt.destinationDecimals !== undefined));
   const formattedSwapRate = new BigNumber(swapRate).toFixed(2, 1);
   const swapRateText = `1 ${transactionDetails.swapDetails?.sourceTokenCode} ≈ ${formatTokenForDisplay(formattedSwapRate, transactionDetails.swapDetails?.destinationTokenCode ?? "")}`;
 
@@ -286,36 +286,28 @@ export const TransactionDetailsBottomSheetCustomContent: React.FC<
         </View>
       </View>
 
-      {transactionDetails.xoxnoReceipt && (
+      {assetDiffs.length > 0 ? (
         <View className="bg-background-tertiary rounded-[16px] p-4">
-          <AssetDiffRow
-            diff={{
-              amount: transactionDetails.swapDetails?.sourceAmount ?? "",
-              assetCode: transactionDetails.swapDetails?.sourceTokenCode ?? "",
-              isCredit: false,
-            }}
-            themeColors={themeColors}
-            isLast={false}
-            baseUnits={
-              transactionDetails.xoxnoReceipt.sourceDecimals === undefined
-            }
-          />
-          {receiptStatus === "confirmed" ? (
+          {assetDiffs.map((diff, index) => (
             <AssetDiffRow
-              diff={{
-                amount: transactionDetails.swapDetails?.destinationAmount ?? "",
-                assetCode:
-                  transactionDetails.swapDetails?.destinationTokenCode ?? "",
-                isCredit: true,
-              }}
+              key={`${diff.isCredit ? "credit" : "debit"}:${diff.assetCode}:${diff.assetIssuer ?? "native"}:${diff.amount}`}
+              diff={diff}
               themeColors={themeColors}
-              isLast
+              isLast={
+                index === assetDiffs.length - 1 &&
+                (!transactionDetails.swapReceipt ||
+                  receiptStatus === "confirmed")
+              }
               baseUnits={
-                transactionDetails.xoxnoReceipt.destinationDecimals ===
-                undefined
+                !!transactionDetails.swapReceipt &&
+                (diff.isCredit
+                  ? transactionDetails.swapReceipt.destinationDecimals
+                  : transactionDetails.swapReceipt.sourceDecimals) === undefined
               }
             />
-          ) : (
+          ))}
+
+          {transactionDetails.swapReceipt && receiptStatus !== "confirmed" && (
             <View className="flex-row justify-between gap-2">
               <Text md secondary>
                 {t("history.transactionHistory.received")}
@@ -335,82 +327,68 @@ export const TransactionDetailsBottomSheetCustomContent: React.FC<
               )}
             </View>
           )}
-        </View>
-      )}
-      {!transactionDetails.xoxnoReceipt &&
-        (assetDiffs.length > 0 ? (
-          <View className="bg-background-tertiary rounded-[16px] p-4">
-            {assetDiffs.map((diff, index) => (
-              <AssetDiffRow
-                key={`${diff.isCredit ? "credit" : "debit"}:${diff.assetCode}:${diff.assetIssuer ?? "native"}:${diff.amount}`}
-                diff={diff}
-                themeColors={themeColors}
-                isLast={index === assetDiffs.length - 1}
-              />
-            ))}
 
-            {shouldShowCounterparty && counterpartyAddress && (
-              <View className="flex-row items-center justify-between pt-3 mt-3 border-t border-border-primary">
-                <View className="flex-row items-center gap-2">
-                  <Icon.User01 size={20} color={themeColors.gray[9]} />
-                  <Text md color={themeColors.white}>
-                    {isReceiving
-                      ? t("history.transactionDetails.from")
-                      : t("history.transactionDetails.to")}
-                  </Text>
-                </View>
-                <View className="flex-row items-center gap-2">
-                  <Avatar
-                    hasDarkBackground
-                    publicAddress={counterpartyAddress}
-                    size={AvatarSizes.SMALL}
-                  />
-                  <Text md primary medium>
-                    {truncateAddress(counterpartyAddress)}
-                  </Text>
-                </View>
+          {shouldShowCounterparty && counterpartyAddress && (
+            <View className="flex-row items-center justify-between pt-3 mt-3 border-t border-border-primary">
+              <View className="flex-row items-center gap-2">
+                <Icon.User01 size={20} color={themeColors.gray[9]} />
+                <Text md color={themeColors.white}>
+                  {isReceiving
+                    ? t("history.transactionDetails.from")
+                    : t("history.transactionDetails.to")}
+                </Text>
               </View>
-            )}
-          </View>
-        ) : (
-          <>
-            {transactionDetails.transactionType ===
-              TransactionType.CREATE_ACCOUNT && (
-              <CreateAccountTransactionDetailsContent
-                transactionDetails={transactionDetails}
-              />
-            )}
-
-            {transactionDetails.transactionType === TransactionType.SWAP && (
-              <SwapTransactionDetailsContent
-                transactionDetails={transactionDetails}
-              />
-            )}
-
-            {transactionDetails.transactionType === TransactionType.PAYMENT && (
-              <PaymentTransactionDetailsContent
-                transactionDetails={transactionDetails}
-              />
-            )}
-
-            {transactionDetails.transactionType ===
-              TransactionType.CONTRACT_TRANSFER &&
-              transactionDetails.contractDetails?.transferDetails && (
-                <SorobanTokenTransferTransactionDetailsContent
-                  transactionDetails={transactionDetails}
+              <View className="flex-row items-center gap-2">
+                <Avatar
+                  hasDarkBackground
+                  publicAddress={counterpartyAddress}
+                  size={AvatarSizes.SMALL}
                 />
-              )}
+                <Text md primary medium>
+                  {truncateAddress(counterpartyAddress)}
+                </Text>
+              </View>
+            </View>
+          )}
+        </View>
+      ) : (
+        <>
+          {transactionDetails.transactionType ===
+            TransactionType.CREATE_ACCOUNT && (
+            <CreateAccountTransactionDetailsContent
+              transactionDetails={transactionDetails}
+            />
+          )}
 
-            {transactionDetails.transactionType ===
-              TransactionType.CONTRACT_TRANSFER &&
-              transactionDetails.contractDetails
-                ?.collectibleTransferDetails && (
-                <SorobanCollectibleTransferTransactionDetailsContent
-                  transactionDetails={transactionDetails}
-                />
-              )}
-          </>
-        ))}
+          {transactionDetails.transactionType === TransactionType.SWAP && (
+            <SwapTransactionDetailsContent
+              transactionDetails={transactionDetails}
+            />
+          )}
+
+          {transactionDetails.transactionType === TransactionType.PAYMENT && (
+            <PaymentTransactionDetailsContent
+              transactionDetails={transactionDetails}
+            />
+          )}
+
+          {transactionDetails.transactionType ===
+            TransactionType.CONTRACT_TRANSFER &&
+            transactionDetails.contractDetails?.transferDetails && (
+              <SorobanTokenTransferTransactionDetailsContent
+                transactionDetails={transactionDetails}
+              />
+            )}
+
+          {transactionDetails.transactionType ===
+            TransactionType.CONTRACT_TRANSFER &&
+            transactionDetails.contractDetails?.collectibleTransferDetails && (
+              <SorobanCollectibleTransferTransactionDetailsContent
+                transactionDetails={transactionDetails}
+              />
+            )}
+        </>
+      )}
 
       <List variant="secondary" items={detailItems} />
     </View>

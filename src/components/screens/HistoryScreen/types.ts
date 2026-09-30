@@ -115,7 +115,7 @@ export interface TransactionDetails {
   paymentDetails?: PaymentDetailsType;
   contractDetails?: ContractDetailsType;
   assetDiffs?: AssetDiffSummary[];
-  xoxnoReceipt?: {
+  swapReceipt?: {
     network: NETWORKS;
     transactionHash: string;
     viewer: string;

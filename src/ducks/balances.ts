@@ -164,37 +164,20 @@ const getUpdatedPricedBalances = (
   return sortBalances(updatedPricedBalances);
 };
 
-/** Longest a balances refresh waits for the token catalog before it goes on without it. */
-const CATALOG_WAIT_MS = 3000;
-
-/**
- * Fills the price of held tokens the price fetch left without one from XOXNO's
- * token catalog. The wait for the catalog is short and its failure is ignored,
- * so the catalog can only add prices, never hold the balances back. Fiat is
- * mainnet-only, like the price fetch.
- */
-const fillPricesFromCatalog = async (
+const fillPricesFromCatalog = (
   pricedBalances: PricedBalanceMap,
   network: NETWORKS,
-): Promise<PricedBalanceMap> => {
-  if (!isMainnet(network)) return pricedBalances;
+): PricedBalanceMap =>
+  isMainnet(network)
+    ? fillMissingPricesFromCatalog(
+        pricedBalances,
+        useTokenCatalogStore.getState().byNetwork[network]?.byContractId,
+        mapNetworkToNetworkDetails(network).networkPassphrase,
+      )
+    : pricedBalances;
 
-  const { fetchCatalog } = useTokenCatalogStore.getState();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  await Promise.race([
-    fetchCatalog(network),
-    new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, CATALOG_WAIT_MS);
-    }),
-  ]);
-  clearTimeout(timer);
-
-  return fillMissingPricesFromCatalog(
-    pricedBalances,
-    useTokenCatalogStore.getState().byNetwork[network]?.byContractId,
-    mapNetworkToNetworkDetails(network).networkPassphrase,
-  );
-};
+// A late request must never update another account/network or a newer refresh.
+let balancesRequest = 0;
 
 /**
  * Fetches and processes priced balances with a timeout for price fetching
@@ -233,7 +216,13 @@ const fetchPricedBalances = async (
     ]);
   } catch (error) {
     // If price fetch times out, set existing data and continue fetching
-    set({ pricedBalances: existingPricedBalances, isLoading: false });
+    set({
+      pricedBalances: fillPricesFromCatalog(
+        existingPricedBalances,
+        params.network,
+      ),
+      isLoading: false,
+    });
   }
 
   // Make sure to wait until the prices finishes fetching
@@ -353,6 +342,12 @@ export const useBalancesStore = create<BalancesState>((set, get) => ({
   fetchedPublicKey: null,
   fetchedNetwork: null,
   fetchAccountBalances: async (params) => {
+    if (!params.publicKey) return;
+    const request = ++balancesRequest;
+    const current = () => request === balancesRequest;
+    const setCurrent = (state: Partial<BalancesState>) => {
+      if (current()) set(state);
+    };
     try {
       // It can happen that the public key is not available yet during app initialization
       // In this case, we should early return and wait for the public key to be available
@@ -361,9 +356,24 @@ export const useBalancesStore = create<BalancesState>((set, get) => ({
 
       set({ isLoading: true, error: null });
 
-      // Warm the token catalog (logos and prices) for the swap screens. It runs
-      // beside the balances fetch and never blocks it.
-      useTokenCatalogStore.getState().fetchCatalog(params.network);
+      useTokenCatalogStore
+        .getState()
+        .fetchCatalog(params.network)
+        .then(() => {
+          const state = get();
+          if (
+            current() &&
+            state.fetchedPublicKey === params.publicKey &&
+            state.fetchedNetwork === params.network
+          )
+            set({
+              pricedBalances: fillPricesFromCatalog(
+                state.pricedBalances,
+                params.network,
+              ),
+            });
+        })
+        .catch(() => {});
 
       const customTokensContractsIds = await retrieveCustomTokens({
         network: params.network,
@@ -386,6 +396,7 @@ export const useBalancesStore = create<BalancesState>((set, get) => ({
           useV2: useRemoteConfigStore.getState().use_balances_v2,
         });
 
+      if (!current()) return;
       if (!balances) {
         throw new Error("No balances returned from API");
       }
@@ -402,13 +413,20 @@ export const useBalancesStore = create<BalancesState>((set, get) => ({
 
       // Get existing state priced balances to preserve price data
       const statePricedBalances = get().pricedBalances;
+      set({
+        pricedBalances: fillPricesFromCatalog(
+          getExistingPricedBalances(balances, statePricedBalances),
+          params.network,
+        ),
+      });
       const pricedBalances = await fetchPricedBalances(
-        set,
+        setCurrent,
         balances,
         statePricedBalances,
         params,
       );
 
+      if (!current()) return;
       const scanResult = extractScanResultsFromBalances(
         pricedBalances,
         params.network,
@@ -428,6 +446,7 @@ export const useBalancesStore = create<BalancesState>((set, get) => ({
         error: null,
       });
     } catch (error) {
+      if (!current()) return;
       // Backend API errors come from the axios interceptor as plain ApiError
       // objects (not Error instances) with the server's reason in `data`.
       const apiError =

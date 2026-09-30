@@ -14,16 +14,13 @@ import { mapPaymentHistoryItem } from "components/screens/HistoryScreen/mappers/
 import { mapSorobanHistoryItem } from "components/screens/HistoryScreen/mappers/soroban";
 import {
   mapSwapHistoryItem,
-  mapXoxnoSwapHistoryItem,
+  mapAggregatorSwapHistoryItem,
 } from "components/screens/HistoryScreen/mappers/swap";
 import { HistoryItemData } from "components/screens/HistoryScreen/types";
 import { NetworkDetails, NETWORKS } from "config/constants";
 import { logger } from "config/logger";
 import { BalanceMap } from "config/types";
-import {
-  toAggregatorSwapOperation,
-  toXoxnoSwapOperation,
-} from "helpers/aggregatorSwapHistory";
+import { toAggregatorSwapOperation } from "helpers/aggregatorSwapHistory";
 import { processAssetBalanceChanges } from "helpers/assetBalanceChanges";
 import { formatTransactionDate } from "helpers/date";
 import { getAttrsFromSorobanHorizonOp } from "helpers/soroban";
@@ -39,13 +36,13 @@ export interface MapHistoryItemDataProps {
   themeColors: ThemeColors;
 }
 
-export const mapInstantXoxnoHistoryItem = (
+export const mapInstantAggregatorHistoryItem = (
   args: MapHistoryItemDataProps,
 ): HistoryItemData | null => {
-  const swap = toXoxnoSwapOperation(args);
+  const swap = toAggregatorSwapOperation(args);
   if (!swap) return null;
   const { operation, network, themeColors } = args;
-  return mapXoxnoSwapHistoryItem({
+  return mapAggregatorSwapHistoryItem({
     operation: swap,
     stellarExpertUrl: getStellarExpertUrl(network),
     date: formatTransactionDate(operation.created_at, false),
@@ -85,7 +82,7 @@ export const mapHistoryItemData = async ({
   // Get URL for transaction viewing
   const stellarExpertUrl = getStellarExpertUrl(network);
 
-  const instantSwap = mapInstantXoxnoHistoryItem({
+  const instantSwap = mapInstantAggregatorHistoryItem({
     operation,
     accountBalances,
     publicKey,
@@ -185,26 +182,6 @@ export const mapHistoryItemData = async ({
       operation,
       networkDetails,
     );
-
-    const swapOperation = await toAggregatorSwapOperation({
-      operation,
-      publicKey,
-      networkDetails,
-      assetDiffs,
-    });
-
-    if (swapOperation) {
-      return mapSwapHistoryItem({
-        operation: swapOperation,
-        stellarExpertUrl,
-        date,
-        fee,
-        memo,
-        network: networkDetails.network,
-        themeColors,
-        xdr,
-      });
-    }
 
     return mapSorobanHistoryItem({
       operation,

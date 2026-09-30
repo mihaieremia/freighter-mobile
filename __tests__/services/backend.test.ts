@@ -1520,8 +1520,11 @@ describe("fetchSwapReceipt", () => {
     tokenOut: "output",
     receivedAtoms: "123456789012345678901234567",
   };
+  let receiptTestId = 0;
   beforeEach(() => {
     jest.clearAllMocks();
+    identity.transactionHash = String(++receiptTestId).padStart(64, "0");
+    receipt.transactionHash = identity.transactionHash;
   });
   it("requests the selected operation and checks the full receipt identity", async () => {
     (freighterBackendV2.get as jest.Mock).mockResolvedValue({
@@ -1531,6 +1534,8 @@ describe("fetchSwapReceipt", () => {
     expect(
       await fetchSwapReceipt(identity, "output", controller.signal),
     ).toEqual(receipt);
+    expect(await fetchSwapReceipt(identity, "output")).toEqual(receipt);
+    expect(freighterBackendV2.get).toHaveBeenCalledTimes(1);
     expect(freighterBackendV2.get).toHaveBeenCalledWith(
       `/swap/receipt/${identity.transactionHash}`,
       {

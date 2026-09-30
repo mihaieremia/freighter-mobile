@@ -286,7 +286,6 @@ describe("transactionBuilder Duck", () => {
     expect(outcome!.resultXdr).toBe(mockResultXdr);
     // The meta rides on the outcome too: an aggregator swap's settled amount
     // is read from its contract events.
-    expect(outcome!.resultMetaXdr).toBe(mockResultMetaXdr);
     expect(state.isSubmitting).toBe(false);
     expect(state.transactionHash).toBe(mockTxHash);
     expect(state.error).toBeNull();

@@ -1,7 +1,7 @@
 /* eslint-disable @fnando/consistent-import/consistent-import */
 import {
   mapHistoryItemData,
-  mapInstantXoxnoHistoryItem,
+  mapInstantAggregatorHistoryItem,
 } from "components/screens/HistoryScreen/mappers";
 import {
   TransactionStatus,
@@ -102,7 +102,7 @@ describe("mapHistoryItemData — router swaps", () => {
   });
 
   it("renders sent amount and cached pair immediately; received amount waits for modal receipt", async () => {
-    const instant = mapInstantXoxnoHistoryItem(args(xlmToUsdt0));
+    const instant = mapInstantAggregatorHistoryItem(args(xlmToUsdt0));
     expect(instant).not.toBeInstanceOf(Promise);
     expect(instant?.transactionDetails.transactionType).toBe(
       TransactionType.SWAP,
@@ -117,8 +117,10 @@ describe("mapHistoryItemData — router swaps", () => {
       destinationTokenCode: "USDT0",
       destinationAmount: "",
     });
-    expect(instant?.transactionDetails.assetDiffs).toEqual([]);
-    expect(instant?.transactionDetails.xoxnoReceipt).toMatchObject({
+    expect(instant?.transactionDetails.assetDiffs).toEqual([
+      expect.objectContaining({ isCredit: false, amount: "10" }),
+    ]);
+    expect(instant?.transactionDetails.swapReceipt).toMatchObject({
       transactionHash: xlmToUsdt0.transaction_hash,
       viewer: SWAPPER,
       operationIndex: 0,
@@ -140,7 +142,7 @@ describe("mapHistoryItemData — router swaps", () => {
       destinationTokenCode: "XAUM",
       destinationAmount: "",
     });
-    expect(item.transactionDetails.xoxnoReceipt).toMatchObject({
+    expect(item.transactionDetails.swapReceipt).toMatchObject({
       tokenOut: XAUM_CONTRACT,
       destinationDecimals: 9,
     });
@@ -155,13 +157,13 @@ describe("mapHistoryItemData — router swaps", () => {
     expect(item.amountText).toBe(`-67546053 base units ${catalogUsdc.id}`);
     expect(item.isAddingFunds).toBe(false);
     expect(item.transactionDetails.swapDetails?.destinationAmount).toBe("");
+    expect(item.transactionDetails.swapReceipt?.sourceDecimals).toBeUndefined();
     expect(
-      item.transactionDetails.xoxnoReceipt?.sourceDecimals,
+      item.transactionDetails.swapReceipt?.destinationDecimals,
     ).toBeUndefined();
-    expect(
-      item.transactionDetails.xoxnoReceipt?.destinationDecimals,
-    ).toBeUndefined();
-    expect(item.transactionDetails.assetDiffs).toEqual([]);
+    expect(item.transactionDetails.assetDiffs).toEqual([
+      expect.objectContaining({ isCredit: false, decimals: 0 }),
+    ]);
     expectNoEnrichment();
   });
 

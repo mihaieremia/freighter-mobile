@@ -154,29 +154,6 @@ export const addressToString = (address: xdr.ScAddress) => {
 export const scValToAddress = (scVal: xdr.ScVal): xdr.ScAddress =>
   xdr.expectUnionVariant(scVal, "scvAddress").address;
 
-/** Reads exactly the named struct fields, in canonical symbol order. */
-export const scValFields = (
-  value: xdr.ScVal,
-  names: string[],
-): Map<string, xdr.ScVal> => {
-  if (value.type !== "scvMap" || value.map?.length !== names.length) {
-    throw new Error("Unsafe swap transaction: unexpected struct field count");
-  }
-  return new Map(
-    value.map.map((entry, i) => {
-      if (
-        entry.key.type !== "scvSymbol" ||
-        entry.key.sym.toString() !== names[i]
-      ) {
-        throw new Error(
-          "Unsafe swap transaction: unexpected or unordered field",
-        );
-      }
-      return [names[i], entry.val];
-    }),
-  );
-};
-
 /**
  * Extracts the address credentials from a SorobanCredentials union, handling
  * all CAP-71 address arms. Returns null for source-account credentials, which
@@ -250,45 +227,21 @@ export const getArgsForTokenInvocation = (
   return { from, to, amount, tokenId };
 };
 
-export const INVOCATION_TYPE_INVOKE = "invoke" as const;
-
-export interface FnArgsInvoke {
-  type: typeof INVOCATION_TYPE_INVOKE;
-  fnName: string;
-  contractId: string;
-  args: xdr.ScVal[];
-}
-
-/**
- * The contract call of a host function, or null when it is not a contract
- * invocation.
- */
-export const getInvokeContractArgs = (
-  hostFn: Operation.InvokeHostFunction | undefined,
-): FnArgsInvoke | null => {
+export const getTokenInvocationArgs = (
+  hostFn: Operation.InvokeHostFunction,
+): TokenInvocationArgs | null => {
   const func = hostFn?.func;
   if (!func || func.type !== "hostFunctionTypeInvokeContract") {
     return null;
   }
-  const call: xdr.InvokeContractArgs = func.invokeContract;
 
-  return {
-    type: INVOCATION_TYPE_INVOKE,
-    fnName: call.functionName.toString(),
-    contractId: Address.fromScAddress(call.contractAddress).toString(),
-    args: call.args,
-  };
-};
+  const invokedContract: xdr.InvokeContractArgs = func.invokeContract;
 
-export const getTokenInvocationArgs = (
-  hostFn: Operation.InvokeHostFunction,
-): TokenInvocationArgs | null => {
-  const invoked = getInvokeContractArgs(hostFn);
-  if (!invoked) {
-    return null;
-  }
-
-  const { fnName, contractId, args } = invoked;
+  const contractId = Address.fromScAddress(
+    invokedContract.contractAddress,
+  ).toString();
+  const fnName = invokedContract.functionName.toString();
+  const { args } = invokedContract;
 
   if (
     fnName !== SorobanTokenInterface.transfer &&
@@ -348,45 +301,6 @@ export const getAttrsFromSorobanHorizonOp = (
     .operations[0] as Operation.InvokeHostFunction;
 
   return getTokenInvocationArgs(invokeHostFn);
-};
-
-/**
- * The contract call a history operation makes, read from the record's own
- * envelope. Unlike getAttrsFromSorobanHorizonOp it does not depend on the
- * backend's `contractId`/`fnName` attributes and names any function, not only
- * token transfers. Returns null when the record has no envelope, the envelope
- * does not decode, or its first operation is not a contract invocation.
- *
- * @param operation - A history operation record carrying `transaction_attr.envelope_xdr`
- * @param networkDetails - The network the record belongs to
- */
-export const getInvokedContract = (
-  operation: Horizon.ServerApi.OperationRecord,
-  networkDetails: NetworkDetails,
-): FnArgsInvoke | null => {
-  const envelopeXdr = (
-    operation as { transaction_attr?: { envelope_xdr?: string } }
-  ).transaction_attr?.envelope_xdr;
-  if (!envelopeXdr) {
-    return null;
-  }
-
-  try {
-    const parsed = TransactionBuilder.fromXDR(
-      envelopeXdr,
-      networkDetails.networkPassphrase,
-    );
-    const transaction =
-      "innerTransaction" in parsed ? parsed.innerTransaction : parsed;
-    // only one op per tx in Soroban right now
-    return getInvokeContractArgs(
-      transaction.operations[0] as Operation.InvokeHostFunction,
-    );
-  } catch (error) {
-    logger.error("getInvokedContract", "Failed to decode the envelope", error);
-
-    return null;
-  }
 };
 
 /**
@@ -467,12 +381,20 @@ export const formatTokenForDisplay = (amount: BigNumber, decimals: number) => {
   return formatted;
 };
 
+export const INVOCATION_TYPE_INVOKE = "invoke" as const;
 export const INVOCATION_TYPE_WASM = "wasm" as const;
 export const INVOCATION_TYPE_SAC = "sac" as const;
 /** CAP-85 (Protocol 28): contract created from an external executable reference. */
 export const INVOCATION_TYPE_EXTERNAL_REF = "externalRef" as const;
 /** An invocation whose contents could not be decoded. */
 export const INVOCATION_TYPE_UNRECOGNIZED = "unrecognized" as const;
+
+export interface FnArgsInvoke {
+  type: typeof INVOCATION_TYPE_INVOKE;
+  fnName: string;
+  contractId: string;
+  args: xdr.ScVal[];
+}
 
 export interface FnArgsCreateWasm {
   type: typeof INVOCATION_TYPE_WASM;

@@ -57,19 +57,7 @@ export interface UseSwapAmountInputsResult {
   receiveSecondaryText: string;
 }
 
-/**
- * Owns the two amount cards of the swap screen. The user types in either one; that
- * card's amount drives the quote (`inputSide` in the swap store) and the other card
- * shows what the backend derived from it. The store's `sourceAmount` and
- * `destinationAmount` stay the single source of truth for everything downstream
- * (balance checks, review sheet, transaction), so the converters here are only
- * input widgets and mirrors of the store.
- *
- * Returns the converter for each card, wrapped so that typing in a card makes it the
- * input side, plus `setSellTokenAmount` for code that sets the sell amount
- * programmatically (percentage buttons, direction toggle) and therefore also makes
- * the sell card the input side.
- */
+/** The edited card drives the quote; the other mirrors it. Store amounts remain authoritative. */
 export const useSwapAmountInputs = ({
   sellConverter,
   sourceBalance,

@@ -2,14 +2,14 @@ import { fireEvent, render } from "@testing-library/react-native";
 import HistoryItem from "components/screens/HistoryScreen/HistoryItem";
 import {
   mapHistoryItemData,
-  mapInstantXoxnoHistoryItem,
+  mapInstantAggregatorHistoryItem,
 } from "components/screens/HistoryScreen/mappers";
 import { PUBLIC_NETWORK_DETAILS } from "config/constants";
 import React from "react";
 
 jest.mock("components/screens/HistoryScreen/mappers", () => ({
   mapHistoryItemData: jest.fn(),
-  mapInstantXoxnoHistoryItem: jest.fn(),
+  mapInstantAggregatorHistoryItem: jest.fn(),
 }));
 jest.mock("hooks/useColors", () => ({
   __esModule: true,
@@ -24,7 +24,7 @@ jest.mock("components/screens/HistoryScreen/helpers", () => ({
 
 it("renders and opens XOXNO details immediately without starting asynchronous row mapping", () => {
   const transactionDetails = { swapDetails: { destinationAmount: "" } };
-  (mapInstantXoxnoHistoryItem as jest.Mock).mockReturnValue({
+  (mapInstantAggregatorHistoryItem as jest.Mock).mockReturnValue({
     transactionDetails,
     rowText: "IN to OUT",
     amountText: "-123 base units IN",

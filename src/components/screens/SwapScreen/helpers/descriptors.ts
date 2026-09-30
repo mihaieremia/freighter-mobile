@@ -147,18 +147,7 @@ export const withDescriptorPrice = (
         },
       };
 
-/**
- * The USD price of one whole destination token, as the receive card shows it and
- * as the confirmation price snapshot records it. In order, the first non-zero:
- * the held balance's own price, then the prices map's. A non-held destination has
- * no balance to carry a price, so the caller gives it a map that already carries
- * the picker's price and the XOXNO catalog's (`withDescriptorPrice`, then
- * `withCatalogPrices`). Undefined when none prices the token.
- *
- * @param balance - The held balance, or the priceless shim of a non-held destination
- * @param prices - The active network's prices map, with those prices added
- * @param descriptor - The destination the user picked
- */
+/** First nonzero price: held balance, then the caller's picker/catalog-enriched map. */
 export const resolveDestinationDisplayPrice = ({
   balance,
   prices,
