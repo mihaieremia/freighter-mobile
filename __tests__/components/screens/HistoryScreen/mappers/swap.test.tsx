@@ -1,8 +1,12 @@
 import { logos } from "assets/logos";
-import { mapSwapHistoryItem } from "components/screens/HistoryScreen/mappers/swap";
+import {
+  mapSwapHistoryItem,
+  mapXoxnoSwapHistoryItem,
+} from "components/screens/HistoryScreen/mappers/swap";
 import { NETWORKS } from "config/constants";
 import { getIconUrl } from "helpers/getIconUrl";
 import { ThemeColors } from "hooks/useColors";
+import "i18n";
 
 jest.mock("helpers/getIconUrl");
 
@@ -148,4 +152,34 @@ describe("mapSwapHistoryItem - nativeness detection from operation type", () => 
       network: NETWORKS.PUBLIC,
     });
   });
+});
+
+it("maps raw XOXNO input instantly with base units and cached icons only", () => {
+  mockGetIconUrl.mockClear();
+  const result = mapXoxnoSwapHistoryItem(
+    buildSwapArgs({
+      amount: "",
+      source_amount: "123456789012345678901234567",
+      source_asset_code: "INPUT_CONTRACT",
+      source_asset_issuer: "INPUT_CONTRACT",
+      source_asset_type: "custom_token",
+      asset_code: "OUTPUT_CONTRACT",
+      asset_issuer: "OUTPUT_CONTRACT",
+      asset_type: "custom_token",
+      source_icon_url: "https://cached.example/input.png",
+      xoxnoReceipt: { sourceDecimals: undefined },
+    }),
+  );
+  expect(result.amountText).toContain("123456789012345678901234567");
+  expect(result.amountText).toContain("base units");
+  expect(result.rowText).toContain("INPUT_CONTRACT");
+  expect(result.transactionDetails.swapDetails?.destinationAmount).toBe("");
+  expect(mockGetIconUrl).not.toHaveBeenCalled();
+  const icon = result.IconComponent as React.ReactElement<{
+    sourceOne: { token?: unknown; image?: string };
+    sourceTwo: { token?: unknown };
+  }>;
+  expect(icon.props.sourceOne.token).toBeUndefined();
+  expect(icon.props.sourceTwo.token).toBeUndefined();
+  expect(icon.props.sourceOne.image).toBe("https://cached.example/input.png");
 });

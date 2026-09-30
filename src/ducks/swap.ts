@@ -39,7 +39,7 @@ export interface SwapPathResult {
   /** Full fee, in XLM, of the aggregator transaction. Absent when the wallet builds the transaction. */
   networkFeeXlm?: string;
   /** Unsigned aggregator transaction. Absent for a classic route, or before the trustline exists. */
-  aggregatorEnvelopeXdr?: string;
+  aggregatorTransaction?: SwapQuote["transaction"];
   /** The aggregator route needs the destination trustline added in a first transaction. */
   requiresTrustlineFirst?: boolean;
 }
@@ -319,7 +319,9 @@ const findBackendSwapPath = async (params: {
     conversionRate: quote.conversionRate,
     source: quote.source,
     networkFeeXlm: quote.networkFeeXlm,
-    aggregatorEnvelopeXdr: quote.transaction?.envelopeXdr,
+    aggregatorTransaction: quote.transaction
+      ? { ...quote.transaction }
+      : undefined,
     requiresTrustlineFirst: quote.requiresTrustline,
   };
 };

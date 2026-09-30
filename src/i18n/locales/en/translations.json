@@ -358,6 +358,10 @@
       }
     },
     "transactionDetails": {
+      "baseUnits": "base units",
+      "receiptUnavailable": "Amount unavailable",
+      "retryReceipt": "Retry",
+
       "viewOnStellarExpert": "View on stellar.expert",
       "fee": "Fee",
       "status": "Status",

@@ -3,7 +3,6 @@ import { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import BigNumber from "bignumber.js";
 import {
   addBoughtTokenToBalances,
-  buildAggregatorExpectation,
   getQuoteExpiredOperationCodes,
   getTokenFromBalance,
   isAggregatorSlippageRejection,
@@ -81,9 +80,17 @@ interface SwapTransactionParams {
   >;
 }
 
+export interface SwapReview {
+  scanResult: Blockaid.StellarTransactionScanResponse | undefined;
+  quote: SwapPathResult;
+  transactionXDR: string;
+  requestId: string | null;
+  identity: string;
+}
+
 interface UseSwapTransactionResult {
   isProcessing: boolean;
-  executeSwap: () => Promise<void>;
+  executeSwap: (review: SwapReview) => Promise<void>;
   /**
    * Builds + scans the swap transaction. Returns the fresh transaction scan
    * result so callers can decide the post-scan UX (e.g. the unable-to-scan
@@ -91,11 +98,7 @@ interface UseSwapTransactionResult {
    * `scanResult` is undefined when the scan fails (treated as unable-to-scan).
    * Returns undefined only when required params are missing (no build).
    */
-  setupSwapTransaction: () => Promise<{
-    scanResult: Blockaid.StellarTransactionScanResponse | undefined;
-    quote: SwapPathResult;
-    transactionXDR: string;
-  } | void>;
+  setupSwapTransaction: () => Promise<SwapReview | void>;
   handleProcessingScreenClose: () => void;
   sourceToken: NativeToken | NonNativeToken;
   destinationToken: NativeToken | NonNativeToken;
@@ -213,6 +216,33 @@ export const useSwapTransaction = ({
   const { t } = useAppTranslation();
   const { showToast } = useToast();
   const swapAttemptRef = useRef(0);
+  const preparedReviewRef = useRef<SwapReview | null>(null);
+  const identityRef = useRef({
+    publicKey: account?.publicKey,
+    network,
+    sourceAmount,
+  });
+  identityRef.current = {
+    publicKey: account?.publicKey,
+    network,
+    sourceAmount,
+  };
+  const getReviewIdentity = useCallback(() => {
+    const selection = useSwapStore.getState();
+    const settings = useSwapSettingsStore.getState();
+    return JSON.stringify([
+      identityRef.current,
+      selection.sourceTokenId,
+      selection.sourceAmount,
+      selection.destinationToken?.id,
+      selection.destinationToken?.decimals,
+      selection.inputSide,
+      selection.destinationInputAmount,
+      settings.swapFee,
+      settings.swapSlippage,
+      settings.swapTimeout,
+    ]);
+  }, []);
   useEffect(
     () => () => {
       swapAttemptRef.current += 1;
@@ -244,6 +274,8 @@ export const useSwapTransaction = ({
   );
 
   const setupSwapTransaction = useCallback(async () => {
+    preparedReviewRef.current = null;
+    const identity = getReviewIdentity();
     if (
       !sourceBalance ||
       !destinationTokenInput ||
@@ -316,15 +348,7 @@ export const useSwapTransaction = ({
               senderAddress: account.publicKey,
             })
           : prepareAggregatorSwap({
-              envelopeXdr: quote.aggregatorEnvelopeXdr ?? "",
-              expectation: buildAggregatorExpectation({
-                network,
-                sender: account.publicKey,
-                sourceBalance,
-                destinationBalance: destinationTokenInput,
-                sourceAmount,
-                pathResult: quote,
-              }),
+              transaction: quote.aggregatorTransaction,
             });
     } else {
       transactionXDR = await buildSwapTransaction({
@@ -353,12 +377,22 @@ export const useSwapTransaction = ({
     }
 
     // A failed scan is undefined, which classifies as unable-to-scan downstream.
+    const { requestId } = useTransactionBuilderStore.getState();
     const scanResult = await scanSafely(transactionXDR);
-    if (!selectionIsCurrent() || useSwapStore.getState().pathResult !== quote)
+    const builder = useTransactionBuilderStore.getState();
+    if (
+      !selectionIsCurrent() ||
+      useSwapStore.getState().pathResult !== quote ||
+      getReviewIdentity() !== identity ||
+      builder.requestId !== requestId ||
+      builder.transactionXDR !== transactionXDR
+    )
       return undefined;
     setTransactionScanResult(scanResult);
 
-    return { scanResult, quote, transactionXDR };
+    const review = { scanResult, quote, transactionXDR, requestId, identity };
+    preparedReviewRef.current = review;
+    return review;
   }, [
     sourceBalance,
     destinationTokenInput,
@@ -370,513 +404,535 @@ export const useSwapTransaction = ({
     sourceAmount,
     network,
     scanSafely,
+    getReviewIdentity,
     t,
   ]);
 
-  const executeSwap = useCallback(async () => {
-    if (!account) {
-      return;
-    }
-
-    // Validate required data before proceeding
-    if (!sourceBalance?.tokenCode) {
-      throw new Error("Source token is required for swap transaction");
-    }
-
-    if (!destinationTokenInput?.tokenCode) {
-      throw new Error("Destination token is required for swap transaction");
-    }
-
-    swapAttemptRef.current += 1;
-    const attempt = swapAttemptRef.current;
-    let builderRequestId = useTransactionBuilderStore.getState().requestId;
-    const isCurrentAttempt = () => swapAttemptRef.current === attempt;
-    const isCurrentTransaction = () =>
-      isCurrentAttempt() &&
-      useTransactionBuilderStore.getState().requestId === builderRequestId;
-    const cancelStaleAttempt = () => {
-      if (isCurrentTransaction()) return false;
-      if (isCurrentAttempt()) setIsProcessing(false);
-      return true;
-    };
-    setIsProcessing(true);
-
-    // Declared outside the try so the catch can cancel a snapshot whose
-    // transaction never reached submission, and can still enrich a
-    // post-submission failure's telemetry with the identities it classified.
-    let snapshotHandle: ConfirmationSnapshotHandle | null = null;
-    // Only a submitted transaction has attempted volume to report, so the
-    // catch reads this to decide whether the failure event carries volume
-    // data or just its pre-existing failure properties.
-    let didSubmit = false;
-    let sourceIdentity: AssetIdentity | null = null;
-    let destIdentity: AssetIdentity | null = null;
-    let sourceCanonicalId = "";
-    let destCanonicalId = "";
-
-    // A lock cancels quietly. A signing failure reaches this flow's single
-    // failure handler below, without attempted volume.
-    const signOrThrow = (secretKey: string): string | null => {
-      // Signing reads the global builder: a closed or replaced flow must not
-      // sign another transaction after its asynchronous scan finishes.
-      if (cancelStaleAttempt()) return null;
-      if (!isWalletUnlocked()) {
-        setIsProcessing(false);
-        return null;
-      }
-      const signedXDR = signTransaction({ secretKey, network });
-      if (!signedXDR) {
-        const { error: signingError } = useTransactionBuilderStore.getState();
-        analytics.trackInternalSignedTransactionError(signingError);
-        throw new Error(signingError || "Failed to sign transaction");
-      }
-      analytics.trackInternalSignedTransaction();
-
-      return signedXDR;
-    };
-
-    try {
-      // Abort cleanly if an auto-lock engaged after the swap was prepared.
-      // Return (don't throw): being locked isn't a swap failure, so skip the
-      // catch's analytics + error-toast path — a hard-coded throw would also
-      // surface as a non-localized toast title. A return (not a throw) keeps
-      // the fire-and-forget executeSwap() from rejecting unhandled.
-      if (!isWalletUnlocked()) {
-        setIsProcessing(false);
+  const executeSwap = useCallback(
+    async (review: SwapReview) => {
+      if (!review || preparedReviewRef.current !== review) return;
+      if (!account) {
         return;
       }
 
-      // Read the freshest balances at call time via the ref (not the
-      // closure, which is stale for anything besides tokenCode — see the
-      // comment on swapBalancesRef above) for classification and the
-      // cached-display-price fallback: `currentPrice` changes on every price
-      // poll without recreating this callback. Always defined in practice —
-      // the ref is seeded from this same hook's props and re-synced on every
-      // render — but narrowed explicitly rather than asserted.
-      const { sourceBalance: freshSource, destinationTokenInput: freshDest } =
-        swapBalancesRef.current;
-      if (!freshSource || !freshDest) {
-        setIsProcessing(false);
-        return;
+      // Validate required data before proceeding
+      if (!sourceBalance?.tokenCode) {
+        throw new Error("Source token is required for swap transaction");
       }
 
-      const networkDetails = mapNetworkToNetworkDetails(network);
+      if (!destinationTokenInput?.tokenCode) {
+        throw new Error("Destination token is required for swap transaction");
+      }
 
-      // Aggregator swap into an asset the account has no trustline for: the
-      // built transaction is the trustline. Send it, then swap.
-      const quotedPath = useSwapStore.getState().pathResult;
-      if (quotedPath?.requiresTrustlineFirst && account.publicKey) {
-        if (!signOrThrow(account.privateKey)) return;
-        // An intermediate step: its hash must not reach the store, or the
-        // processing screen reports the swap as settled on the trustline.
-        // `didSubmit` stays false, so a failure here carries no volume.
-        const trustlineOutcome = await submitTransaction({
-          network,
-          isIntermediate: true,
-        });
-        if (!trustlineOutcome.hash) {
-          // submitTransaction has logged the detail.
-          throw toSubmitFailure(
-            __DEV__
-              ? trustlineOutcome.error ||
-                  "Failed to submit trustline transaction"
-              : t("swapScreen.errors.trustlineSubmitFailed"),
-            trustlineOutcome,
-          );
-        }
-        // The trustline is on chain whatever becomes of the swap, so it is
-        // reported now and not again when the swap settles.
-        trackTrustlineAdded(destinationTokenInput.tokenCode);
-        if (cancelStaleAttempt()) return;
+      swapAttemptRef.current += 1;
+      const attempt = swapAttemptRef.current;
+      let builderRequestId = review.requestId;
+      let builderXdr: string | null = review.transactionXDR;
+      if (
+        getReviewIdentity() !== review.identity ||
+        useSwapStore.getState().pathResult !== review.quote ||
+        useTransactionBuilderStore.getState().requestId !== builderRequestId ||
+        useTransactionBuilderStore.getState().transactionXDR !== builderXdr
+      )
+        return;
+      preparedReviewRef.current = null;
 
-        // The trustline exists now, so the aggregator can simulate the swap.
-        const swapPath = await requote({
-          sourceBalance: freshSource,
-          destinationBalance: freshDest,
-          sourceAmount,
-          network,
-          publicKey: account.publicKey,
-        });
-        if (cancelStaleAttempt()) return;
-        if (
-          !swapPath ||
-          swapPath === quotedPath ||
-          !isAggregatorQuoteSource(swapPath.source) ||
-          !swapPath.aggregatorEnvelopeXdr
-        ) {
-          throw new Error(t("swapScreen.errors.trustlineAddedSwapUnavailable"));
+      const isCurrentAttempt = () => swapAttemptRef.current === attempt;
+      const isCurrentTransaction = () =>
+        isCurrentAttempt() &&
+        getReviewIdentity() === review.identity &&
+        useTransactionBuilderStore.getState().requestId === builderRequestId &&
+        useTransactionBuilderStore.getState().transactionXDR === builderXdr;
+      const cancelStaleAttempt = () => {
+        if (isCurrentTransaction()) return false;
+        if (isCurrentAttempt()) setIsProcessing(false);
+        return true;
+      };
+      setIsProcessing(true);
+
+      // Declared outside the try so the catch can cancel a snapshot whose
+      // transaction never reached submission, and can still enrich a
+      // post-submission failure's telemetry with the identities it classified.
+      let snapshotHandle: ConfirmationSnapshotHandle | null = null;
+      // Only a submitted transaction has attempted volume to report, so the
+      // catch reads this to decide whether the failure event carries volume
+      // data or just its pre-existing failure properties.
+      let didSubmit = false;
+      let sourceIdentity: AssetIdentity | null = null;
+      let destIdentity: AssetIdentity | null = null;
+      let sourceCanonicalId = "";
+      let destCanonicalId = "";
+
+      // A lock cancels quietly. A signing failure reaches this flow's single
+      // failure handler below, without attempted volume.
+      const signOrThrow = (secretKey: string): string | null => {
+        // Signing reads the global builder: a closed or replaced flow must not
+        // sign another transaction after its asynchronous scan finishes.
+        if (cancelStaleAttempt()) return null;
+        if (!isWalletUnlocked()) {
+          setIsProcessing(false);
+          return null;
         }
-        if (
-          new BigNumber(swapPath.destinationAmountMin).isLessThan(
-            quotedPath.destinationAmountMin,
-          )
-        ) {
-          throw new Error(t("swapScreen.errors.trustlineAddedPriceMoved"));
+        const expiresAt =
+          useTransactionBuilderStore.getState().transactionExpiresAt;
+        if (expiresAt != null && expiresAt <= Date.now() / 1000 + 20) {
+          throw new Error(t("swapScreen.errors.quoteExpired"));
         }
-        const swapXdr = prepareAggregatorSwap({
-          envelopeXdr: swapPath.aggregatorEnvelopeXdr,
-          expectation: buildAggregatorExpectation({
+        const signedXDR = signTransaction({ secretKey, network });
+        if (!signedXDR) {
+          const { error: signingError } = useTransactionBuilderStore.getState();
+          analytics.trackInternalSignedTransactionError(signingError);
+          throw new Error(signingError || "Failed to sign transaction");
+        }
+        analytics.trackInternalSignedTransaction();
+
+        return signedXDR;
+      };
+
+      try {
+        // Abort cleanly if an auto-lock engaged after the swap was prepared.
+        // Return (don't throw): being locked isn't a swap failure, so skip the
+        // catch's analytics + error-toast path — a hard-coded throw would also
+        // surface as a non-localized toast title. A return (not a throw) keeps
+        // the fire-and-forget executeSwap() from rejecting unhandled.
+        if (!isWalletUnlocked()) {
+          setIsProcessing(false);
+          return;
+        }
+
+        // Read the freshest balances at call time via the ref (not the
+        // closure, which is stale for anything besides tokenCode — see the
+        // comment on swapBalancesRef above) for classification and the
+        // cached-display-price fallback: `currentPrice` changes on every price
+        // poll without recreating this callback. Always defined in practice —
+        // the ref is seeded from this same hook's props and re-synced on every
+        // render — but narrowed explicitly rather than asserted.
+        const { sourceBalance: freshSource, destinationTokenInput: freshDest } =
+          swapBalancesRef.current;
+        if (!freshSource || !freshDest) {
+          setIsProcessing(false);
+          return;
+        }
+
+        const networkDetails = mapNetworkToNetworkDetails(network);
+
+        // Aggregator swap into an asset the account has no trustline for: the
+        // built transaction is the trustline. Send it, then swap.
+        const quotedPath = useSwapStore.getState().pathResult;
+        if (quotedPath?.requiresTrustlineFirst && account.publicKey) {
+          if (!signOrThrow(account.privateKey)) return;
+          // An intermediate step: its hash must not reach the store, or the
+          // processing screen reports the swap as settled on the trustline.
+          // `didSubmit` stays false, so a failure here carries no volume.
+          const trustlineOutcome = await submitTransaction({
             network,
-            sender: account.publicKey,
+            isIntermediate: true,
+          });
+          if (!trustlineOutcome.hash) {
+            // submitTransaction has logged the detail.
+            throw toSubmitFailure(
+              __DEV__
+                ? trustlineOutcome.error ||
+                    "Failed to submit trustline transaction"
+                : t("swapScreen.errors.trustlineSubmitFailed"),
+              trustlineOutcome,
+            );
+          }
+          // The trustline is on chain whatever becomes of the swap, so it is
+          // reported now and not again when the swap settles.
+          trackTrustlineAdded(destinationTokenInput.tokenCode);
+          if (cancelStaleAttempt()) return;
+
+          // The trustline exists now, so the aggregator can simulate the swap.
+          const swapPath = await requote({
             sourceBalance: freshSource,
             destinationBalance: freshDest,
             sourceAmount,
-            pathResult: swapPath,
-          }),
-        });
-        if (!isCurrentAttempt()) return;
-        builderRequestId = useTransactionBuilderStore.getState().requestId;
-        if (!swapXdr) {
-          const { error: verifyError } = useTransactionBuilderStore.getState();
-          // prepareAggregatorSwap has logged the detail.
-          throw new Error(
-            __DEV__
-              ? verifyError || "Failed to prepare swap transaction"
-              : t("swapScreen.errors.prepareSwapFailed"),
-          );
-        }
-
-        // The review scanned the trustline transaction, not this swap, so the
-        // swap envelope gets its own scan before it is signed. Same scan call
-        // as the review; a failed scan is unable-to-scan, which proceeds as it
-        // does in the single-transaction flow.
-        const swapScanResult = await scanSafely(swapXdr);
-        if (cancelStaleAttempt()) return;
-        const swapSecurityLevel =
-          assessTransactionSecurity(swapScanResult).level;
-        const blockedKey = BLOCKED_SWAP_ERROR_KEYS[swapSecurityLevel];
-        if (blockedKey) {
-          logger.warn(
-            "SwapTransaction",
-            `Blocked the swap after the trustline: the swap transaction scan is ${swapSecurityLevel.toLowerCase()}`,
-          );
-          throw new Error(t(blockedKey));
-        }
-      }
-
-      const signedXDR = signOrThrow(account.privateKey);
-      if (!signedXDR) return;
-      // The quoted destination amount of the transaction just signed: a
-      // trustline-first flow re-quoted in place, so the store holds its quote.
-      const signedDestinationAmount =
-        useSwapStore.getState().pathResult?.destinationAmount;
-
-      // Everything the volume telemetry needs is snapshotted here — after
-      // signing succeeded and immediately before submission, so the prices
-      // are as close as possible to the transaction's actual execution time.
-      // Amounts and prices are frozen together and carried to whichever
-      // terminal event fires. Both legs' canonical ids go into ONE price
-      // request, so they're priced at the same instant. Starting it only once
-      // signing has succeeded also means a signing failure never issues a
-      // price request it would just have to abort.
-      const heldBalances = Object.values(useBalancesStore.getState().balances);
-      const { tokenCode: srcCode, issuer: srcIssuerRaw } =
-        formatTokenIdentifier(getTokenIdentifier(freshSource));
-      sourceIdentity = classifyAssetIdentity(
-        srcCode,
-        srcIssuerRaw || undefined,
-        networkDetails,
-        heldBalances,
-      );
-      const { tokenCode: dstCode, issuer: dstIssuerRaw } =
-        formatTokenIdentifier(getTokenIdentifier(freshDest));
-      destIdentity = classifyAssetIdentity(
-        dstCode,
-        dstIssuerRaw || undefined,
-        networkDetails,
-        heldBalances,
-      );
-      sourceCanonicalId = canonicalIdFromIdentity(sourceIdentity);
-      destCanonicalId = canonicalIdFromIdentity(destIdentity);
-
-      // The snapshot's cached_display fallback records the price the user
-      // saw. The source is a held balance: its own price, else the prices
-      // store. The destination may be a non-held shim with no `currentPrice`,
-      // so it is priced the way the receive card prices it (balance, prices
-      // store, the picker's price, the catalog's), by the same helper.
-      const displayPrices =
-        usePricesStore.getState().pricesByNetwork[network] ?? {};
-      const destinationDescriptor = useSwapStore.getState().destinationToken;
-      const destinationDisplayPrice = resolveDestinationDisplayPrice({
-        balance: freshDest,
-        prices: withCatalogPrices(
-          withDescriptorPrice(displayPrices, destinationDescriptor),
-          [destinationDescriptor?.id],
-          useTokenCatalogStore.getState().byNetwork[network]?.byContractId,
-          network,
-        ),
-        descriptor: destinationDescriptor,
-      });
-
-      snapshotHandle = startConfirmationPriceSnapshot({
-        canonicalIds: [sourceCanonicalId, destCanonicalId],
-        network,
-        useV2: useRemoteConfigStore.getState().use_token_prices_v2,
-        cachedDisplayPrices: {
-          [sourceCanonicalId]: {
-            currentPrice:
-              freshSource.currentPrice ??
-              displayPrices[sourceCanonicalId]?.currentPrice ??
-              null,
-          },
-          [destCanonicalId]: {
-            currentPrice: destinationDisplayPrice ?? null,
-          },
-        },
-      });
-
-      // Read before the await: closing the processing screen mid-submit
-      // unmounts the swap screen, whose cleanup resets the swap settings to
-      // their defaults. Reading afterwards would report the default tolerance
-      // rather than the one this swap was actually built with.
-      const { swapSlippage: freshSwapSlippage } =
-        useSwapSettingsStore.getState();
-
-      // submitTransaction throws only for a debug override; otherwise it
-      // resolves with this attempt's own outcome. That outcome is read from
-      // the return value, never from the store: closing the processing screen
-      // mid-submit resets the store, and the store's requestId guard then
-      // (correctly) refuses to write this attempt's result — so the terminal
-      // event would otherwise report a settled swap as a derivation error, or
-      // a Horizon rejection as `unknown` / `transport`.
-      const submitOutcome = await submitTransaction({ network });
-      // Set only once the call has returned. A throw out of submitTransaction
-      // itself (the debug forced-failure override) never reached the network,
-      // so it carries no attempted volume and must not be bucketed as
-      // `transport` — which means "submitted, but no verdict came back". A
-      // genuine submit failure resolves rather than throwing, so it still
-      // counts as submitted, as it should.
-      didSubmit = true;
-
-      if (!submitOutcome.hash) {
-        const errorMessage =
-          submitOutcome.error || "Failed to submit transaction";
-        const submitFailure = toSubmitFailure(errorMessage, submitOutcome);
-        submitFailure.quoteExpiredCodes = getQuoteExpiredOperationCodes(
-          submitOutcome.resultCodes,
-        );
-        // A rejected router swap is a trapped call to Horizon. Whether the
-        // router rejected it for slippage is only in the transaction's meta, so
-        // that is read (bounded) before the failure is classified; when it
-        // says so, the rejection is handled as an expired quote, like a classic
-        // swap's `op_under_dest_min`. Any doubt keeps the generic failure.
-        if (
-          !submitFailure.quoteExpiredCodes.length &&
-          (await isAggregatorSlippageRejection({
-            outcome: submitOutcome,
-            signedXDR,
             network,
-          }))
-        ) {
-          submitFailure.quoteExpiredCodes = [ROUTER_SLIPPAGE_REASON_CODE];
-          // Put first so `pickReasonCode` reports it, not `function_trapped`.
-          submitFailure.resultCodes = {
-            ...submitOutcome.resultCodes,
-            operations: [
-              ROUTER_SLIPPAGE_REASON_CODE,
-              ...(submitOutcome.resultCodes?.operations ?? []),
-            ],
+            publicKey: account.publicKey,
+          });
+          if (cancelStaleAttempt()) return;
+          if (
+            !swapPath ||
+            swapPath === quotedPath ||
+            !isAggregatorQuoteSource(swapPath.source) ||
+            !swapPath.aggregatorTransaction?.envelopeXdr
+          ) {
+            throw new Error(
+              t("swapScreen.errors.trustlineAddedSwapUnavailable"),
+            );
+          }
+          if (
+            new BigNumber(swapPath.destinationAmountMin).isLessThan(
+              quotedPath.destinationAmountMin,
+            )
+          ) {
+            throw new Error(t("swapScreen.errors.trustlineAddedPriceMoved"));
+          }
+          const swapXdr = prepareAggregatorSwap({
+            transaction: swapPath.aggregatorTransaction,
+          });
+          if (!isCurrentAttempt()) return;
+          builderRequestId = useTransactionBuilderStore.getState().requestId;
+          builderXdr = swapXdr;
+          if (!swapXdr) {
+            const { error: verifyError } =
+              useTransactionBuilderStore.getState();
+            // prepareAggregatorSwap has logged the detail.
+            throw new Error(
+              __DEV__
+                ? verifyError || "Failed to prepare swap transaction"
+                : t("swapScreen.errors.prepareSwapFailed"),
+            );
+          }
+
+          // The review scanned the trustline transaction, not this swap, so the
+          // swap envelope gets its own scan before it is signed. Same scan call
+          // as the review; a failed scan is unable-to-scan, which proceeds as it
+          // does in the single-transaction flow.
+          const swapScanResult = await scanSafely(swapXdr);
+          if (cancelStaleAttempt()) return;
+          const swapSecurityLevel =
+            assessTransactionSecurity(swapScanResult).level;
+          const blockedKey = BLOCKED_SWAP_ERROR_KEYS[swapSecurityLevel];
+          if (blockedKey) {
+            logger.warn(
+              "SwapTransaction",
+              `Blocked the swap after the trustline: the swap transaction scan is ${swapSecurityLevel.toLowerCase()}`,
+            );
+            throw new Error(t(blockedKey));
+          }
+        }
+
+        const signedXDR = signOrThrow(account.privateKey);
+        if (!signedXDR) return;
+        // The quoted destination amount of the transaction just signed: a
+        // trustline-first flow re-quoted in place, so the store holds its quote.
+        const signedDestinationAmount =
+          useSwapStore.getState().pathResult?.destinationAmount;
+
+        // Everything the volume telemetry needs is snapshotted here — after
+        // signing succeeded and immediately before submission, so the prices
+        // are as close as possible to the transaction's actual execution time.
+        // Amounts and prices are frozen together and carried to whichever
+        // terminal event fires. Both legs' canonical ids go into ONE price
+        // request, so they're priced at the same instant. Starting it only once
+        // signing has succeeded also means a signing failure never issues a
+        // price request it would just have to abort.
+        const heldBalances = Object.values(
+          useBalancesStore.getState().balances,
+        );
+        const { tokenCode: srcCode, issuer: srcIssuerRaw } =
+          formatTokenIdentifier(getTokenIdentifier(freshSource));
+        sourceIdentity = classifyAssetIdentity(
+          srcCode,
+          srcIssuerRaw || undefined,
+          networkDetails,
+          heldBalances,
+        );
+        const { tokenCode: dstCode, issuer: dstIssuerRaw } =
+          formatTokenIdentifier(getTokenIdentifier(freshDest));
+        destIdentity = classifyAssetIdentity(
+          dstCode,
+          dstIssuerRaw || undefined,
+          networkDetails,
+          heldBalances,
+        );
+        sourceCanonicalId = canonicalIdFromIdentity(sourceIdentity);
+        destCanonicalId = canonicalIdFromIdentity(destIdentity);
+
+        // The snapshot's cached_display fallback records the price the user
+        // saw. The source is a held balance: its own price, else the prices
+        // store. The destination may be a non-held shim with no `currentPrice`,
+        // so it is priced the way the receive card prices it (balance, prices
+        // store, the picker's price, the catalog's), by the same helper.
+        const displayPrices =
+          usePricesStore.getState().pricesByNetwork[network] ?? {};
+        const destinationDescriptor = useSwapStore.getState().destinationToken;
+        const destinationDisplayPrice = resolveDestinationDisplayPrice({
+          balance: freshDest,
+          prices: withCatalogPrices(
+            withDescriptorPrice(displayPrices, destinationDescriptor),
+            [destinationDescriptor?.id],
+            useTokenCatalogStore.getState().byNetwork[network]?.byContractId,
+            network,
+          ),
+          descriptor: destinationDescriptor,
+        });
+
+        snapshotHandle = startConfirmationPriceSnapshot({
+          canonicalIds: [sourceCanonicalId, destCanonicalId],
+          network,
+          useV2: useRemoteConfigStore.getState().use_token_prices_v2,
+          cachedDisplayPrices: {
+            [sourceCanonicalId]: {
+              currentPrice:
+                freshSource.currentPrice ??
+                displayPrices[sourceCanonicalId]?.currentPrice ??
+                null,
+            },
+            [destCanonicalId]: {
+              currentPrice: destinationDisplayPrice ?? null,
+            },
+          },
+        });
+
+        // Read before the await: closing the processing screen mid-submit
+        // unmounts the swap screen, whose cleanup resets the swap settings to
+        // their defaults. Reading afterwards would report the default tolerance
+        // rather than the one this swap was actually built with.
+        const { swapSlippage: freshSwapSlippage } =
+          useSwapSettingsStore.getState();
+
+        // submitTransaction throws only for a debug override; otherwise it
+        // resolves with this attempt's own outcome. That outcome is read from
+        // the return value, never from the store: closing the processing screen
+        // mid-submit resets the store, and the store's requestId guard then
+        // (correctly) refuses to write this attempt's result — so the terminal
+        // event would otherwise report a settled swap as a derivation error, or
+        // a Horizon rejection as `unknown` / `transport`.
+        const submitOutcome = await submitTransaction({ network });
+        // Set only once the call has returned. A throw out of submitTransaction
+        // itself (the debug forced-failure override) never reached the network,
+        // so it carries no attempted volume and must not be bucketed as
+        // `transport` — which means "submitted, but no verdict came back". A
+        // genuine submit failure resolves rather than throwing, so it still
+        // counts as submitted, as it should.
+        didSubmit = true;
+
+        if (!submitOutcome.hash) {
+          const errorMessage =
+            submitOutcome.error || "Failed to submit transaction";
+          const submitFailure = toSubmitFailure(errorMessage, submitOutcome);
+          submitFailure.quoteExpiredCodes = getQuoteExpiredOperationCodes(
+            submitOutcome.resultCodes,
+          );
+          // A rejected router swap is a trapped call to Horizon. Whether the
+          // router rejected it for slippage is only in the transaction's meta, so
+          // that is read (bounded) before the failure is classified; when it
+          // says so, the rejection is handled as an expired quote, like a classic
+          // swap's `op_under_dest_min`. Any doubt keeps the generic failure.
+          if (
+            !submitFailure.quoteExpiredCodes.length &&
+            (await isAggregatorSlippageRejection({
+              outcome: submitOutcome,
+              signedXDR,
+              network,
+            }))
+          ) {
+            submitFailure.quoteExpiredCodes = [ROUTER_SLIPPAGE_REASON_CODE];
+            // Put first so `pickReasonCode` reports it, not `function_trapped`.
+            submitFailure.resultCodes = {
+              ...submitOutcome.resultCodes,
+              operations: [
+                ROUTER_SLIPPAGE_REASON_CODE,
+                ...(submitOutcome.resultCodes?.operations ?? []),
+              ],
+            };
+          }
+          throw submitFailure;
+        }
+
+        // Prices are frozen at the moment the swap settled, not when the
+        // settled amount has been read.
+        const snapshot = snapshotHandle.resolve();
+
+        // The settled destination amount comes from the transaction itself,
+        // never the quote. Horizon's response carries the meta of a classic
+        // swap's result but not a Soroban swap's, which Stellar Expert may serve
+        // a few seconds late, so `swap.completed` is emitted by a continuation
+        // that nothing waits for: the status, balances and navigation below
+        // never sit behind that lookup.
+        reportSettledSwap({
+          outcome: submitOutcome,
+          signedXDR,
+          network,
+          destination: freshDest,
+          publicKey: account.publicKey,
+          snapshot,
+          sourceAmount,
+          sourceCanonicalId,
+          destCanonicalId,
+          sourceIdentity,
+          destIdentity,
+          sourceToken: sourceBalance.tokenCode,
+          destToken: destinationTokenInput.tokenCode,
+          quotedDestinationAmount: signedDestinationAmount,
+          allowedSlippage: freshSwapSlippage?.toString(),
+        });
+
+        // A Soroban token bought in this swap has no trustline to add, so list it in
+        // the user's balances once the swap has settled.
+        await addBoughtTokenToBalances({
+          token: destinationDescriptor,
+          publicKey: account.publicKey,
+          network,
+        });
+
+        // Fire SWAP_TRUSTLINE_ADDED when the combined changeTrust +
+        // pathPaymentStrictSend transaction confirmed a new trustline. A
+        // trustline sent ahead of the swap reported itself when it landed.
+        if (!quotedPath?.requiresTrustlineFirst) {
+          trackTrustlineAdded(destinationTokenInput.tokenCode);
+        }
+      } catch (error) {
+        if (isCurrentAttempt()) setIsProcessing(false);
+        // transactionBuilder.submitTransaction logs submit failures at
+        // the appropriate severity (4xx-with-result_codes → warn
+        // breadcrumb, everything else → logger.error). Re-logging here
+        // would either duplicate Sentry events or pollute breadcrumbs.
+
+        // Carried on the thrown error, off this attempt's own submit outcome —
+        // not read back from the store, which a mid-submit Close resets.
+        const submitFailure =
+          error instanceof Error ? (error as SubmitFailure) : undefined;
+        const quoteExpiredCodes = submitFailure?.quoteExpiredCodes;
+        const isQuoteExpired = !!quoteExpiredCodes?.length;
+        const submitResultCodes = submitFailure?.resultCodes ?? undefined;
+
+        // A pre-submission failure (signing, or a throw before submit) still
+        // emits swap.failed, but with no volume data: nothing reached the
+        // network, so there is no attempted volume and no snapshot to price it
+        // with. Cancel the fetch rather than let it outlive the flow.
+        const reasonCode = pickReasonCode(submitResultCodes);
+        let volume: FailureVolume | undefined;
+        if (!didSubmit) {
+          snapshotHandle?.cancel();
+        } else if (snapshotHandle && sourceIdentity && destIdentity) {
+          const snapshot = snapshotHandle.resolve();
+          const sourceLeg = deriveLegUsd(
+            sourceAmount,
+            snapshot.pricesById?.[sourceCanonicalId]?.currentPrice,
+          );
+          volume = {
+            identity: sourceIdentity,
+            toIdentity: destIdentity,
+            amount: new BigNumber(sourceAmount || 0).toNumber(),
+            sourceLeg,
+            priceSource: snapshot.source,
+            priceFreshness: snapshot.freshness,
+            reasonCode,
+            failureCategory: getFailureCategory(
+              submitFailure?.isProtocolAnswer ?? false,
+              submitFailure?.httpStatus ?? null,
+              reasonCode,
+            ),
           };
         }
-        throw submitFailure;
-      }
 
-      // Prices are frozen at the moment the swap settled, not when the
-      // settled amount has been read.
-      const snapshot = snapshotHandle.resolve();
+        if (isQuoteExpired) {
+          // Over-slippage / liquidity-changed rejection: fire the dedicated
+          // event alongside SWAP_FAIL (emitted just below — the pair is
+          // deliberate, see there) and prompt the user to retry for a fresh
+          // quote. `resultCode` carries the Horizon op code(s) that drove the
+          // expiry so we can slice by reason.
+          // Amounts intentionally dropped (parity with swap.completed/failed,
+          // which carry no amounts). Bare asset codes so from/to_asset_code match
+          // the extension.
+          analytics.track(AnalyticsEvent.SWAP_QUOTE_EXPIRED, {
+            from_asset_code: sourceBalance?.tokenCode,
+            to_asset_code: destinationTokenInput?.tokenCode,
+            result_code: quoteExpiredCodes.join(", "),
+          });
 
-      // The settled destination amount comes from the transaction itself,
-      // never the quote. Horizon's response carries the meta of a classic
-      // swap's result but not a Soroban swap's, which Stellar Expert may serve
-      // a few seconds late, so `swap.completed` is emitted by a continuation
-      // that nothing waits for: the status, balances and navigation below
-      // never sit behind that lookup.
-      reportSettledSwap({
-        outcome: submitOutcome,
-        signedXDR,
-        network,
-        destination: freshDest,
-        publicKey: account.publicKey,
-        snapshot,
-        sourceAmount,
-        sourceCanonicalId,
-        destCanonicalId,
-        sourceIdentity,
-        destIdentity,
-        sourceToken: sourceBalance.tokenCode,
-        destToken: destinationTokenInput.tokenCode,
-        quotedDestinationAmount: signedDestinationAmount,
-        allowedSlippage: freshSwapSlippage?.toString(),
-      });
+          // A quote expiry rejected at submit also counts as a failed swap for
+          // volume purposes: swap.quote_expired carries no volume, and without
+          // this, the failure that `failure_category` exists to measure never
+          // reaches a volume-bearing event. failure_category: "slippage" falls
+          // out of the same reason-code mapping used for every other
+          // rejection, so no special case is needed beyond emitting here too.
+          // Only swap.failed carries volume, so the pair cannot double-count.
+          analytics.trackTransactionError({
+            error: error instanceof Error ? error.message : String(error),
+            errorCode: reasonCode,
+            isSwap: true,
+            sourceToken: sourceBalance?.tokenCode,
+            destToken: destinationTokenInput?.tokenCode,
+            volume,
+          });
 
-      // A Soroban token bought in this swap has no trustline to add, so list it in
-      // the user's balances once the swap has settled.
-      await addBoughtTokenToBalances({
-        token: destinationDescriptor,
-        publicKey: account.publicKey,
-        network,
-      });
+          if (!isCurrentTransaction()) return;
 
-      // Fire SWAP_TRUSTLINE_ADDED when the combined changeTrust +
-      // pathPaymentStrictSend transaction confirmed a new trustline. A
-      // trustline sent ahead of the swap reported itself when it landed.
-      if (!quotedPath?.requiresTrustlineFirst) {
-        trackTrustlineAdded(destinationTokenInput.tokenCode);
-      }
-    } catch (error) {
-      if (isCurrentAttempt()) setIsProcessing(false);
-      // transactionBuilder.submitTransaction logs submit failures at
-      // the appropriate severity (4xx-with-result_codes → warn
-      // breadcrumb, everything else → logger.error). Re-logging here
-      // would either duplicate Sentry events or pollute breadcrumbs.
+          showToast({
+            variant: "error",
+            title: t("swapScreen.errors.quoteExpired"),
+            toastId: "swap-quote-expired",
+            duration: 0,
+          });
 
-      // Carried on the thrown error, off this attempt's own submit outcome —
-      // not read back from the store, which a mid-submit Close resets.
-      const submitFailure =
-        error instanceof Error ? (error as SubmitFailure) : undefined;
-      const quoteExpiredCodes = submitFailure?.quoteExpiredCodes;
-      const isQuoteExpired = !!quoteExpiredCodes?.length;
-      const submitResultCodes = submitFailure?.resultCodes ?? undefined;
+          // The frozen quote is stale — fetch a fresh path so the user's retry
+          // uses a new quote instead of resubmitting the expired one.
+          const {
+            sourceBalance: latestSource,
+            destinationTokenInput: latestDest,
+          } = swapBalancesRef.current;
+          if (latestSource && latestDest && account.publicKey) {
+            // Fire-and-forget: findSwapPath updates the store and handles its own
+            // errors (matches how useSwapPathFinding invokes it).
+            requote({
+              sourceBalance: latestSource,
+              destinationBalance: latestDest,
+              sourceAmount,
+              network,
+              publicKey: account.publicKey,
+              silent: false,
+            });
+          }
 
-      // A pre-submission failure (signing, or a throw before submit) still
-      // emits swap.failed, but with no volume data: nothing reached the
-      // network, so there is no attempted volume and no snapshot to price it
-      // with. Cancel the fetch rather than let it outlive the flow.
-      const reasonCode = pickReasonCode(submitResultCodes);
-      let volume: FailureVolume | undefined;
-      if (!didSubmit) {
-        snapshotHandle?.cancel();
-      } else if (snapshotHandle && sourceIdentity && destIdentity) {
-        const snapshot = snapshotHandle.resolve();
-        const sourceLeg = deriveLegUsd(
-          sourceAmount,
-          snapshot.pricesById?.[sourceCanonicalId]?.currentPrice,
-        );
-        volume = {
-          identity: sourceIdentity,
-          toIdentity: destIdentity,
-          amount: new BigNumber(sourceAmount || 0).toNumber(),
-          sourceLeg,
-          priceSource: snapshot.source,
-          priceFreshness: snapshot.freshness,
-          reasonCode,
-          failureCategory: getFailureCategory(
-            submitFailure?.isProtocolAnswer ?? false,
-            submitFailure?.httpStatus ?? null,
-            reasonCode,
-          ),
-        };
-      }
+          return;
+        }
 
-      if (isQuoteExpired) {
-        // Over-slippage / liquidity-changed rejection: fire the dedicated
-        // event alongside SWAP_FAIL (emitted just below — the pair is
-        // deliberate, see there) and prompt the user to retry for a fresh
-        // quote. `resultCode` carries the Horizon op code(s) that drove the
-        // expiry so we can slice by reason.
-        // Amounts intentionally dropped (parity with swap.completed/failed,
-        // which carry no amounts). Bare asset codes so from/to_asset_code match
-        // the extension.
-        analytics.track(AnalyticsEvent.SWAP_QUOTE_EXPIRED, {
-          from_asset_code: sourceBalance?.tokenCode,
-          to_asset_code: destinationTokenInput?.tokenCode,
-          result_code: quoteExpiredCodes.join(", "),
-        });
-
-        // A quote expiry rejected at submit also counts as a failed swap for
-        // volume purposes: swap.quote_expired carries no volume, and without
-        // this, the failure that `failure_category` exists to measure never
-        // reaches a volume-bearing event. failure_category: "slippage" falls
-        // out of the same reason-code mapping used for every other
-        // rejection, so no special case is needed beyond emitting here too.
-        // Only swap.failed carries volume, so the pair cannot double-count.
         analytics.trackTransactionError({
           error: error instanceof Error ? error.message : String(error),
           errorCode: reasonCode,
           isSwap: true,
           sourceToken: sourceBalance?.tokenCode,
           destToken: destinationTokenInput?.tokenCode,
+          sourceAmount,
+          destAmount: pathResult?.destinationAmount,
           volume,
         });
 
         if (!isCurrentTransaction()) return;
 
+        // Show error toast that persists even if component unmounts
+        const errorMessage =
+          error instanceof Error
+            ? error.message
+            : t("swapScreen.errors.swapTransactionFailed");
+
         showToast({
           variant: "error",
-          title: t("swapScreen.errors.quoteExpired"),
-          toastId: "swap-quote-expired",
+          title: errorMessage,
+          toastId: "swap-transaction-failed",
           duration: 0,
         });
 
-        // The frozen quote is stale — fetch a fresh path so the user's retry
-        // uses a new quote instead of resubmitting the expired one.
-        const {
-          sourceBalance: latestSource,
-          destinationTokenInput: latestDest,
-        } = swapBalancesRef.current;
-        if (latestSource && latestDest && account.publicKey) {
-          // Fire-and-forget: findSwapPath updates the store and handles its own
-          // errors (matches how useSwapPathFinding invokes it).
-          requote({
-            sourceBalance: latestSource,
-            destinationBalance: latestDest,
-            sourceAmount,
-            network,
-            publicKey: account.publicKey,
-            silent: false,
-          });
-        }
-
-        return;
+        // Don't rethrow - this catch is the terminal handler (toast,
+        // analytics, isProcessing reset) and the only caller invokes
+        // executeSwap() fire-and-forget. Rethrowing would surface as an
+        // unhandled promise rejection at the global handler.
       }
-
-      analytics.trackTransactionError({
-        error: error instanceof Error ? error.message : String(error),
-        errorCode: reasonCode,
-        isSwap: true,
-        sourceToken: sourceBalance?.tokenCode,
-        destToken: destinationTokenInput?.tokenCode,
-        sourceAmount,
-        destAmount: pathResult?.destinationAmount,
-        volume,
-      });
-
-      if (!isCurrentTransaction()) return;
-
-      // Show error toast that persists even if component unmounts
-      const errorMessage =
-        error instanceof Error
-          ? error.message
-          : t("swapScreen.errors.swapTransactionFailed");
-
-      showToast({
-        variant: "error",
-        title: errorMessage,
-        toastId: "swap-transaction-failed",
-        duration: 0,
-      });
-
-      // Don't rethrow - this catch is the terminal handler (toast,
-      // analytics, isProcessing reset) and the only caller invokes
-      // executeSwap() fire-and-forget. Rethrowing would surface as an
-      // unhandled promise rejection at the global handler.
-    }
-  }, [
-    account,
-    sourceBalance?.tokenCode,
-    destinationTokenInput?.tokenCode,
-    sourceAmount,
-    pathResult?.destinationAmount,
-    signTransaction,
-    prepareAggregatorSwap,
-    network,
-    scanSafely,
-    submitTransaction,
-    t,
-    showToast,
-  ]);
+    },
+    [
+      account,
+      sourceBalance?.tokenCode,
+      destinationTokenInput?.tokenCode,
+      sourceAmount,
+      pathResult?.destinationAmount,
+      signTransaction,
+      prepareAggregatorSwap,
+      network,
+      scanSafely,
+      submitTransaction,
+      t,
+      showToast,
+      getReviewIdentity,
+    ],
+  );
 
   const handleProcessingScreenClose = () => {
+    preparedReviewRef.current = null;
     swapAttemptRef.current += 1;
     setIsProcessing(false);
 

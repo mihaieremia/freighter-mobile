@@ -1,29 +1,21 @@
 import { NETWORKS } from "config/constants";
 import { useTransactionBuilderStore } from "ducks/transactionBuilder";
-import { verifyAggregatorSwap } from "helpers/aggregatorSwap";
 import { getPerOperationBaseFeeStroops } from "helpers/formatAmount";
 import { buildChangeTrustTx } from "services/stellar";
 
-jest.mock("helpers/aggregatorSwap", () => ({
-  verifyAggregatorSwap: jest.fn(),
-}));
 jest.mock("services/stellar", () => ({
   ...jest.requireActual("services/stellar"),
   buildChangeTrustTx: jest.fn(),
 }));
 
-const mockVerify = verifyAggregatorSwap as jest.Mock;
 const mockBuildTrustline = buildChangeTrustTx as jest.Mock;
 
-const expectation = {
-  network: NETWORKS.PUBLIC,
-  sender: "G",
-  sourceToken: "C1",
-  destinationToken: "C2",
-  sourceAmount: 1n,
-  minDestinationAmount: 1n,
-};
-
+const transaction = () => ({
+  envelopeXdr: "envelope",
+  feeStroops: "98024",
+  resourceFeeStroops: "97924",
+  expiresAt: Math.floor(Date.now() / 1000) + 180,
+});
 describe("useTransactionBuilderStore — aggregator swap", () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -31,45 +23,45 @@ describe("useTransactionBuilderStore — aggregator swap", () => {
   });
 
   describe("prepareAggregatorSwap", () => {
-    it("makes the verified transaction the one to sign and splits its fee", () => {
-      mockVerify.mockReturnValue({
-        feeStroops: 98024n,
-        resourceFeeStroops: 97924n,
-      });
-
-      const xdr = useTransactionBuilderStore
+    it("adopts backend envelope, resets signing state and splits fees", () => {
+      const result = useTransactionBuilderStore
         .getState()
-        .prepareAggregatorSwap({ envelopeXdr: "envelope", expectation });
-
+        .prepareAggregatorSwap({ transaction: transaction() });
       const state = useTransactionBuilderStore.getState();
-      expect(xdr).toBe("envelope");
-      expect(mockVerify).toHaveBeenCalledWith("envelope", expectation);
+      expect(result).toBe("envelope");
       expect(state.transactionXDR).toBe("envelope");
       expect(state.signedTransactionXDR).toBeNull();
-      expect(state.isSoroban).toBe(true);
       expect(state.sorobanResourceFeeXlm).toBe("0.0097924");
       expect(state.sorobanInclusionFeeXlm).toBe("0.0000100");
-      expect(state.error).toBeNull();
+      expect(state.transactionExpiresAt).toBe(transaction().expiresAt);
     });
-
-    it("keeps nothing to sign when the verifier rejects the transaction", () => {
-      mockVerify.mockImplementation(() => {
-        throw new Error(
-          "Unsafe swap transaction: contract is not the swap router",
-        );
+    it.each([
+      {},
+      { feeStroops: "0" },
+      { resourceFeeStroops: "98025" },
+      { feeStroops: "20000001" },
+      { expiresAt: 1 },
+      { resourceFeeStroops: "-1" },
+    ])("rejects missing, expired or invalid metadata %p", (bad) => {
+      const valid = transaction();
+      const candidate = Object.keys(bad).length
+        ? { ...valid, ...bad }
+        : { envelopeXdr: valid.envelopeXdr };
+      useTransactionBuilderStore.setState({
+        signedTransactionXDR: "previous",
+        transactionHash: "old",
       });
-
-      const xdr = useTransactionBuilderStore
-        .getState()
-        .prepareAggregatorSwap({ envelopeXdr: "envelope", expectation });
-
+      expect(
+        useTransactionBuilderStore
+          .getState()
+          .prepareAggregatorSwap({ transaction: candidate }),
+      ).toBeNull();
       const state = useTransactionBuilderStore.getState();
-      expect(xdr).toBeNull();
       expect(state.transactionXDR).toBeNull();
-      expect(state.error).toContain("Unsafe swap transaction");
+      expect(state.signedTransactionXDR).toBeNull();
+      expect(state.transactionHash).toBeNull();
     });
   });
-
   describe("buildTrustlineTransaction", () => {
     const params = {
       tokenCode: "USDC",

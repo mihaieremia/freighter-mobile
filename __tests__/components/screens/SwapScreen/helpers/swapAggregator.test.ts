@@ -1,22 +1,8 @@
 /* eslint-disable @fnando/consistent-import/consistent-import */
-import {
-  buildAggregatorExpectation,
-  isStaleAggregatorQuote,
-} from "components/screens/SwapScreen/helpers";
+import { isStaleAggregatorQuote } from "components/screens/SwapScreen/helpers";
 import { AGGREGATOR_QUOTE_MAX_AGE_MS } from "components/screens/SwapScreen/helpers/swapAggregator";
-import { NETWORKS } from "config/constants";
 import { SwapPathResult } from "ducks/swap";
 import { SwapQuoteSource } from "services/backend";
-
-import {
-  CONTRACT,
-  SENDER,
-  USDC_SAC,
-  XLM_SAC,
-  soroban,
-  usdc,
-  xlm,
-} from "../../../../../__mocks__/swapFixtures";
 
 const path = (over: Partial<SwapPathResult> = {}): SwapPathResult => ({
   sourceAmount: "10",
@@ -26,58 +12,13 @@ const path = (over: Partial<SwapPathResult> = {}): SwapPathResult => ({
   conversionRate: "0.23",
   source: SwapQuoteSource.XOXNO,
   quotedAt: 1_000,
+  aggregatorTransaction: {
+    envelopeXdr: "xdr",
+    feeStroops: "100",
+    resourceFeeStroops: "0",
+    expiresAt: Math.floor(Date.now() / 1000) + 180,
+  },
   ...over,
-});
-
-describe("buildAggregatorExpectation", () => {
-  const base = { network: NETWORKS.PUBLIC, sender: SENDER, sourceAmount: "10" };
-
-  it("expects a classic pair as Stellar Asset Contracts in stroops", () => {
-    expect(
-      buildAggregatorExpectation({
-        ...base,
-        sourceBalance: xlm,
-        destinationBalance: usdc,
-        pathResult: path(),
-      }),
-    ).toEqual({
-      network: NETWORKS.PUBLIC,
-      source: SwapQuoteSource.XOXNO,
-      sender: SENDER,
-      sourceToken: XLM_SAC,
-      destinationToken: USDC_SAC,
-      sourceAmount: 100000000n,
-      minDestinationAmount: 22770000n,
-    });
-  });
-
-  it("expects a bought Soroban token by its own contract and in its own atoms", () => {
-    const expectation = buildAggregatorExpectation({
-      ...base,
-      sourceBalance: xlm,
-      destinationBalance: soroban(18),
-      pathResult: path({
-        destinationAmountMin: "22.248129322452320083",
-      }),
-    });
-
-    expect(expectation.destinationToken).toBe(CONTRACT);
-    expect(expectation.minDestinationAmount).toBe(22248129322452320083n);
-    expect(expectation.sourceAmount).toBe(100000000n);
-  });
-
-  it("expects a sold Soroban token by its own contract and decimals", () => {
-    const expectation = buildAggregatorExpectation({
-      ...base,
-      sourceAmount: "2.5",
-      sourceBalance: soroban(18),
-      destinationBalance: xlm,
-      pathResult: path(),
-    });
-
-    expect(expectation.sourceToken).toBe(CONTRACT);
-    expect(expectation.sourceAmount).toBe(2500000000000000000n);
-  });
 });
 
 describe("isStaleAggregatorQuote", () => {
@@ -120,5 +61,23 @@ describe("isStaleAggregatorQuote", () => {
     jest.setSystemTime(1_000 + ageMs);
 
     expect(isStaleAggregatorQuote(path(over))).toBe(isStale);
+  });
+  it.each(["feeStroops", "resourceFeeStroops"])(
+    "refreshes a quote missing %s despite valid expiry",
+    (field) => {
+      jest.setSystemTime(1_000);
+      const quote = path();
+      if (!quote.aggregatorTransaction) throw new Error("Transaction missing");
+      quote.aggregatorTransaction = {
+        ...quote.aggregatorTransaction,
+        [field]: undefined,
+      };
+      expect(isStaleAggregatorQuote(quote)).toBe(true);
+    },
+  );
+
+  it("keeps a fresh quote with zero resource fee", () => {
+    jest.setSystemTime(1_000);
+    expect(isStaleAggregatorQuote(path())).toBe(false);
   });
 });

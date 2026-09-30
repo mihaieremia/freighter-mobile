@@ -51,6 +51,11 @@ export const backendQuote = (over: Record<string, unknown> = {}) => ({
   destinationDecimals: 7,
   conversionRate: "0.2294904",
   networkFeeXlm: "0.0098024",
-  transaction: { envelopeXdr: BACKEND_ENVELOPE },
+  transaction: {
+    envelopeXdr: BACKEND_ENVELOPE,
+    feeStroops: "98024",
+    resourceFeeStroops: "97924",
+    expiresAt: Math.floor(Date.now() / 1000) + 180,
+  },
   ...over,
 });

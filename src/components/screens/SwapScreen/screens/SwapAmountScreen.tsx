@@ -117,6 +117,8 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
 
   const swapReviewBottomSheetModalRef = useRef<BottomSheetModal>(null);
   const reviewPreparationRef = useRef(0);
+  const preparedReviewRef =
+    useRef<Awaited<ReturnType<typeof setupSwapTransaction>>>(undefined);
   // Review-side security sheet — its Proceed Anyway submits a tx. The
   // trending-detail security sheet is owned by useTrendingTokenDetail and
   // kept structurally separate so the two can't share a proceed handler.
@@ -582,6 +584,7 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
       shouldPresent = false,
       keyboardDismissed: Promise<void> = Promise.resolve(),
     ) => {
+      preparedReviewRef.current = undefined;
       reviewPreparationRef.current += 1;
       const preparation = reviewPreparationRef.current;
       // Latch the CTA's loading state for the entire prepare + present
@@ -603,6 +606,7 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
           return;
         }
 
+        preparedReviewRef.current = setup;
         if (shouldPresent) {
           // Decide the gate from the FRESH tx scan (the lazily-scanned XDR),
           // not the lagging render state — combined with the token scans,
@@ -678,7 +682,9 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
 
     // Execute swap without setTimeout - errors are handled in the hook itself
     // so they persist even if this component unmounts
-    executeSwap();
+    const review = preparedReviewRef.current;
+    preparedReviewRef.current = undefined;
+    if (review) executeSwap(review);
   }, [executeSwap]);
 
   const handleSettingsChange = useCallback(() => {

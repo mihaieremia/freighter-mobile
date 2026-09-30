@@ -7,7 +7,6 @@ import { SwapInputSide, useSwapStore } from "ducks/swap";
 import { SwapQuoteSource, fetchSwapQuote } from "services/backend";
 
 import {
-  BACKEND_ENVELOPE,
   CONTRACT,
   ISSUER,
   SENDER,
@@ -362,7 +361,7 @@ describe("useSwapStore.findSwapPath — backend quote", () => {
       destinationAmountMin: "2.2719551",
       conversionRate: "0.2294904",
       networkFeeXlm: "0.0098024",
-      aggregatorEnvelopeXdr: BACKEND_ENVELOPE,
+      aggregatorTransaction: aggregatorQuote.transaction,
     });
     expect(pathResult?.requiresTrustlineFirst).toBeUndefined();
     expect(mockStrictSendPaths).not.toHaveBeenCalled();
@@ -390,7 +389,7 @@ describe("useSwapStore.findSwapPath — backend quote", () => {
 
     const { pathResult } = useSwapStore.getState();
     expect(pathResult?.requiresTrustlineFirst).toBe(true);
-    expect(pathResult?.aggregatorEnvelopeXdr).toBeUndefined();
+    expect(pathResult?.aggregatorTransaction?.envelopeXdr).toBeUndefined();
   });
 
   it("keeps the classic route as a Horizon quote", async () => {
@@ -412,7 +411,7 @@ describe("useSwapStore.findSwapPath — backend quote", () => {
       destinationAmountMin: "2.2655412",
     });
     expect(
-      useSwapStore.getState().pathResult?.aggregatorEnvelopeXdr,
+      useSwapStore.getState().pathResult?.aggregatorTransaction?.envelopeXdr,
     ).toBeUndefined();
   });
 

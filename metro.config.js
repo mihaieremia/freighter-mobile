@@ -47,10 +47,13 @@ const config = {
     unstable_enablePackageExports: false,
     unstable_enableSymlinks: false,
     resolveRequest: (context, moduleName, platform) => {
-      // Handle @noble/hashes crypto.js import
-      if (moduleName === "@noble/hashes/crypto.js") {
+      // Resolve these package exports while exports remain disabled globally.
+      if (
+        moduleName === "@noble/hashes/crypto.js" ||
+        moduleName === "@xoxno/sdk-js/stellar-swap"
+      ) {
         return {
-          filePath: require.resolve("@noble/hashes/crypto.js"),
+          filePath: require.resolve(moduleName),
           type: "sourceFile",
         };
       }

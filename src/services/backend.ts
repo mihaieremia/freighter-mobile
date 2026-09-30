@@ -16,6 +16,7 @@
 /* eslint-disable arrow-body-style */
 import { Horizon, TransactionBuilder } from "@stellar/stellar-sdk";
 import { AxiosError } from "axios";
+import BigNumber from "bignumber.js";
 import {
   mapNetworkToNetworkDetails,
   NATIVE_TOKEN_CODE,
@@ -1199,7 +1200,12 @@ export interface SwapQuote {
   destinationDecimals: number;
   conversionRate: string;
   path?: string[];
-  transaction?: { envelopeXdr: string };
+  transaction?: {
+    envelopeXdr: string;
+    feeStroops?: string;
+    resourceFeeStroops?: string;
+    expiresAt?: number;
+  };
   networkFeeXlm?: string;
   requiresTrustline?: boolean;
 }
@@ -1551,4 +1557,57 @@ export const fetchCollectibles = async ({
 
     throw error;
   }
+};
+
+export interface SwapReceiptIdentity {
+  network: NETWORKS;
+  transactionHash: string;
+  viewer: string;
+  operationIndex: number;
+}
+
+export interface SwapReceiptResponse extends SwapReceiptIdentity {
+  status: "confirmed" | "unavailable";
+  tokenOut?: string;
+  receivedAtoms?: string;
+}
+
+/** Receipt identity and integer validation are mandatory before display. */
+export const fetchSwapReceipt = async (
+  identity: SwapReceiptIdentity,
+  tokenOut: string,
+  signal?: AbortSignal,
+): Promise<SwapReceiptResponse> => {
+  const { data: response } = await freighterBackendV2.get<{
+    data: SwapReceiptResponse;
+  }>(`/swap/receipt/${identity.transactionHash}`, {
+    params: {
+      network: identity.network,
+      viewer: identity.viewer,
+      operationIndex: identity.operationIndex,
+    },
+    signal,
+  });
+  const data = response?.data;
+  if (
+    !data ||
+    data.network !== identity.network ||
+    data.transactionHash !== identity.transactionHash ||
+    data.viewer !== identity.viewer ||
+    data.operationIndex !== identity.operationIndex ||
+    !["confirmed", "unavailable"].includes(data.status)
+  )
+    throw new Error("Swap receipt identity mismatch");
+  if (
+    data.status === "confirmed" &&
+    (data.tokenOut !== tokenOut ||
+      typeof data.receivedAtoms !== "string" ||
+      data.receivedAtoms.length > 39 ||
+      !/^[1-9][0-9]*$/.test(data.receivedAtoms) ||
+      new BigNumber(data.receivedAtoms).gt(
+        "170141183460469231731687303715884105727",
+      ))
+  )
+    throw new Error("Invalid confirmed swap receipt");
+  return data;
 };

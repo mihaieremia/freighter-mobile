@@ -23,7 +23,6 @@ export {
   isQuoteExpiredResultCodes,
 } from "./quoteErrors";
 export {
-  buildAggregatorExpectation,
   isAggregatorQuoteSource,
   isStaleAggregatorQuote,
 } from "./swapAggregator";

@@ -8,11 +8,14 @@ import {
   renderIconComponent,
   renderActionIcon,
 } from "components/screens/HistoryScreen/helpers";
-import { mapHistoryItemData } from "components/screens/HistoryScreen/mappers";
+import {
+  mapHistoryItemData,
+  mapInstantXoxnoHistoryItem,
+} from "components/screens/HistoryScreen/mappers";
 import { Text } from "components/sds/Typography";
 import { DEFAULT_PRESS_DELAY } from "config/constants";
 import useColors from "hooks/useColors";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { View, TouchableOpacity } from "react-native";
 
 /**
@@ -30,8 +33,32 @@ const HistoryItem: React.FC<HistoryItemProps> = ({
   const [isLoading, setIsLoading] = useState(true);
   const [historyItem, setHistoryItem] = useState<any>(null);
 
+  const instantItem = useMemo(
+    () =>
+      mapInstantXoxnoHistoryItem({
+        operation,
+        accountBalances,
+        publicKey,
+        networkDetails,
+        network,
+        themeColors,
+      }),
+    [
+      operation,
+      accountBalances,
+      publicKey,
+      networkDetails,
+      network,
+      themeColors,
+    ],
+  );
+
   // Load history item data on component mount or when dependencies change
   useEffect(() => {
+    if (instantItem) return undefined;
+    let current = true;
+    setIsLoading(true);
+    setHistoryItem(null);
     const buildHistoryItem = async () => {
       try {
         const historyItemData = await mapHistoryItemData({
@@ -43,15 +70,21 @@ const HistoryItem: React.FC<HistoryItemProps> = ({
           themeColors,
         });
 
+        if (!current) return;
         setHistoryItem(historyItemData);
         setIsLoading(false);
       } catch (error) {
+        if (!current) return;
         setIsLoading(false);
       }
     };
 
     buildHistoryItem();
+    return () => {
+      current = false;
+    };
   }, [
+    instantItem,
     operation,
     accountBalances,
     publicKey,
@@ -61,7 +94,7 @@ const HistoryItem: React.FC<HistoryItemProps> = ({
   ]);
 
   // Show loading spinner while data is being fetched
-  if (isLoading) {
+  if (!instantItem && isLoading) {
     return (
       <View className="flex-0 items-start py-2">
         <Spinner size="small" />
@@ -70,55 +103,56 @@ const HistoryItem: React.FC<HistoryItemProps> = ({
   }
 
   // Return null if no history item data was loaded
-  if (!historyItem) {
+  const item = instantItem ?? historyItem;
+  if (!item) {
     return null;
   }
 
   return (
     <TouchableOpacity
       onPress={() => {
-        handleTransactionDetails(historyItem.transactionDetails);
+        handleTransactionDetails(item.transactionDetails);
       }}
       delayPressIn={DEFAULT_PRESS_DELAY}
       className="mb-4 flex-row justify-between items-center flex-0"
     >
       <View className="flex-row items-center flex-1">
         {renderIconComponent({
-          iconComponent: historyItem.IconComponent,
+          iconComponent: item.IconComponent,
           themeColors,
         })}
         <View className="ml-4 flex-1 mr-2">
           <Text md primary medium numberOfLines={1}>
-            {historyItem.rowText}
+            {item.rowText}
           </Text>
           <View className="flex-row items-center gap-1">
             {renderActionIcon({
-              actionIcon: historyItem.ActionIconComponent,
+              actionIcon: item.ActionIconComponent,
               themeColors,
             })}
             <Text sm secondary numberOfLines={1}>
-              {historyItem.actionText}
+              {item.actionText}
             </Text>
           </View>
         </View>
       </View>
       <View className="items-end justify-center">
-        {historyItem.amountText && (
+        {item.amountText && (
           <Text
             md
             primary
             numberOfLines={1}
             color={
-              historyItem.isAddingFunds
+              item.isAddingFunds
                 ? themeColors.status.success
                 : themeColors.text.primary
             }
           >
-            {historyItem.amountText}
+            {item.amountText}
           </Text>
         )}
         <Text sm secondary numberOfLines={1}>
-          {historyItem.dateText}
+          {item.dateText}
         </Text>
       </View>
     </TouchableOpacity>

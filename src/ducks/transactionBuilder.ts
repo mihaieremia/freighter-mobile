@@ -8,10 +8,6 @@ import { logger } from "config/logger";
 import { PricedBalance } from "config/types";
 import { useDebugStore } from "ducks/debug";
 import {
-  AggregatorSwapExpectation,
-  verifyAggregatorSwap,
-} from "helpers/aggregatorSwap";
-import {
   getPerOperationBaseFeeStroops,
   stroopToXlm,
 } from "helpers/formatAmount";
@@ -19,6 +15,7 @@ import { isContractId } from "helpers/soroban";
 import { isMuxedAccount } from "helpers/stellar";
 import { t } from "i18next";
 import { SimulationTransactionType } from "services/analytics/types";
+import { SwapQuote } from "services/backend";
 import {
   buildChangeTrustTx,
   isHorizonError,
@@ -100,6 +97,7 @@ const FAILED_SUBMIT_OUTCOME: SubmitTransactionOutcome = {
 
 interface TransactionBuilderState {
   transactionXDR: string | null;
+  transactionExpiresAt: number | null;
   signedTransactionXDR: string | null;
   isBuilding: boolean;
   isSubmitting: boolean;
@@ -152,14 +150,9 @@ interface TransactionBuilderState {
     senderAddress: string;
   }) => Promise<string | null>;
 
-  /**
-   * Verifies an unsigned aggregator swap transaction and makes it the one to
-   * sign. Returns null, and sets `error`, if the transaction is not exactly the
-   * swap that was asked for.
-   */
+  /** Adopts a backend-validated envelope and its normalized signing metadata. */
   prepareAggregatorSwap: (params: {
-    envelopeXdr: string;
-    expectation: AggregatorSwapExpectation;
+    transaction: SwapQuote["transaction"];
   }) => string | null;
 
   buildSendCollectibleTransaction: (params: {
@@ -204,6 +197,7 @@ const initialState: Omit<
   | "resetTransaction"
 > = {
   transactionXDR: null,
+  transactionExpiresAt: null,
   signedTransactionXDR: null,
   isBuilding: false,
   isSubmitting: false,
@@ -242,6 +236,7 @@ export const useTransactionBuilderStore = create<TransactionBuilderState>(
       set({
         isBuilding: true,
         error: null,
+        transactionExpiresAt: null,
         requestId: newRequestId,
         isSoroban: isSorobanTx,
         sorobanResourceFeeXlm: null,
@@ -389,6 +384,7 @@ export const useTransactionBuilderStore = create<TransactionBuilderState>(
       set({
         isBuilding: true,
         error: null,
+        transactionExpiresAt: null,
         requestId: newRequestId,
         isSoroban: false,
         sorobanResourceFeeXlm: null,
@@ -470,6 +466,7 @@ export const useTransactionBuilderStore = create<TransactionBuilderState>(
       set({
         isBuilding: true,
         error: null,
+        transactionExpiresAt: null,
         requestId: newRequestId,
         isSoroban: false,
         sorobanResourceFeeXlm: null,
@@ -514,18 +511,34 @@ export const useTransactionBuilderStore = create<TransactionBuilderState>(
       }
     },
 
-    prepareAggregatorSwap: ({ envelopeXdr, expectation }) => {
+    prepareAggregatorSwap: ({ transaction }) => {
       const newRequestId = createRequestId();
 
       try {
-        const verified = verifyAggregatorSwap(envelopeXdr, expectation);
-        const { resourceFeeStroops } = verified;
-        const inclusionFeeStroops = verified.feeStroops - resourceFeeStroops;
+        if (
+          !transaction?.envelopeXdr ||
+          !/^[1-9]\d{0,7}$/.test(transaction.feeStroops ?? "") ||
+          !/^(0|[1-9]\d{0,7})$/.test(transaction.resourceFeeStroops ?? "") ||
+          !Number.isSafeInteger(transaction.expiresAt) ||
+          (transaction.expiresAt ?? 0) <= Date.now() / 1000 + 20
+        ) {
+          throw new Error(
+            "Swap transaction metadata missing or expired; refresh quote",
+          );
+        }
+        const { envelopeXdr } = transaction;
+        const feeStroops = BigInt(transaction.feeStroops!);
+        const resourceFeeStroops = BigInt(transaction.resourceFeeStroops!);
+        if (feeStroops > 20_000_000n || resourceFeeStroops > feeStroops) {
+          throw new Error("Invalid swap transaction fees");
+        }
+        const inclusionFeeStroops = feeStroops - resourceFeeStroops;
 
         set({
           transactionXDR: envelopeXdr,
           isBuilding: false,
           error: null,
+          transactionExpiresAt: transaction?.expiresAt ?? null,
           requestId: newRequestId,
           signedTransactionXDR: null,
           transactionHash: null,
@@ -550,6 +563,11 @@ export const useTransactionBuilderStore = create<TransactionBuilderState>(
           error: extractErrorMessage(error),
           isBuilding: false,
           transactionXDR: null,
+          signedTransactionXDR: null,
+          transactionHash: null,
+          sorobanResourceFeeXlm: null,
+          sorobanInclusionFeeXlm: null,
+          transactionExpiresAt: null,
           requestId: newRequestId,
         });
 
@@ -566,6 +584,7 @@ export const useTransactionBuilderStore = create<TransactionBuilderState>(
       set({
         isBuilding: true,
         error: null,
+        transactionExpiresAt: null,
         requestId: newRequestId,
         isSoroban: true,
         sorobanResourceFeeXlm: null,

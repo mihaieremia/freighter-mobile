@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { Horizon } from "@stellar/stellar-sdk";
+import { NETWORKS } from "config/constants";
 import { SorobanTokenInterface } from "helpers/soroban";
 import { ImageSourcePropType } from "react-native";
 
@@ -114,6 +115,17 @@ export interface TransactionDetails {
   paymentDetails?: PaymentDetailsType;
   contractDetails?: ContractDetailsType;
   assetDiffs?: AssetDiffSummary[];
+  xoxnoReceipt?: {
+    network: NETWORKS;
+    transactionHash: string;
+    viewer: string;
+    operationIndex: number;
+    tokenIn: string;
+    tokenOut: string;
+    sourceAtoms: string;
+    sourceDecimals?: number;
+    destinationDecimals?: number;
+  };
 }
 
 // Additional types for HistoryItem component

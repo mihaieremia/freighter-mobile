@@ -1,14 +1,16 @@
-import { Horizon, scValToBigInt } from "@stellar/stellar-sdk";
+import { Horizon, TransactionBuilder } from "@stellar/stellar-sdk";
+import { decodeStellarSwapEnvelope } from "@xoxno/sdk-js/stellar-swap";
 import BigNumber from "bignumber.js";
 import { AssetDiffSummary } from "components/screens/HistoryScreen/types";
 import { NETWORKS, NetworkDetails } from "config/constants";
 import { LIFI_SWAP_ROUTER } from "config/lifiSwap";
-import { TokenTypeWithCustomToken } from "config/types";
+import { TokenTypeWithCustomToken, BalanceMap } from "config/types";
 import { XOXNO_SWAP_ROUTER } from "config/xoxnoSwap";
 import { useTokenCatalogStore } from "ducks/tokenCatalog";
-import { ROUTER_SWAP_FUNCTION, readRouteTokens } from "helpers/aggregatorSwap";
+import { useTokenIconsStore } from "ducks/tokenIcons";
+import { getNativeContractId } from "helpers/assetIdentity";
 import { readLifiSwap } from "helpers/lifiSwap";
-import { addressToString, getInvokedContract } from "helpers/soroban";
+import { getInvokedContract } from "helpers/soroban";
 import { getCatalogContractId, getCatalogIconUrl } from "helpers/tokenCatalog";
 import { getReceivedTokenAmountFromMeta } from "helpers/transactionResult";
 import { getTokenDetails } from "services/backend";
@@ -73,15 +75,13 @@ const toDecimalAmount = (raw: bigint, decimals: number): string =>
   new BigNumber(raw.toString()).shiftedBy(-decimals).toFixed();
 
 /**
- * The router swap a history operation makes, read from the operation's own
- * envelope: the router contract, the `execute_strategy` function and the tokens
- * and amount in its arguments. Returns null for any other operation.
+ * The LI.FI swap a history operation makes, read from its envelope.
+ * XOXNO recognition uses the synchronous SDK path below.
  */
 const readRouterSwapCall = (
   operation: Horizon.ServerApi.OperationRecord,
   networkDetails: NetworkDetails,
 ): RouterSwapCall | null => {
-  const router = XOXNO_SWAP_ROUTER[networkDetails.network];
   const invoked = getInvokedContract(operation, networkDetails);
   if (
     networkDetails.network === NETWORKS.PUBLIC &&
@@ -90,31 +90,7 @@ const readRouterSwapCall = (
   ) {
     return readLifiSwap(invoked.args);
   }
-  if (
-    !router ||
-    invoked?.contractId !== router ||
-    invoked.fnName !== ROUTER_SWAP_FUNCTION ||
-    invoked.args.length !== 3
-  ) {
-    return null;
-  }
-
-  const [sender, amountIn, payload] = invoked.args;
-  if (
-    sender.type !== "scvAddress" ||
-    amountIn.type !== "scvI128" ||
-    payload.type !== "scvBytes"
-  ) {
-    return null;
-  }
-  const tokens = readRouteTokens(payload.bytes.toBytes());
-  if (!tokens) return null;
-
-  return {
-    sender: addressToString(sender.address),
-    amountIn: scValToBigInt(amountIn),
-    ...tokens,
-  };
+  return null;
 };
 
 /**
@@ -230,9 +206,9 @@ const buildLeg = async (
 };
 
 /**
- * Rewrites an aggregator swap as the path payment record the history swap
+ * Rewrites a LI.FI swap as the path payment record the history swap
  * mapper reads, so it lists as a swap. The call is recognised from the
- * operation's envelope: the pinned router's `execute_strategy` made by the
+ * operation's envelope: the pinned LI.FI router's `swap` made by the
  * viewer. Legs come from the user's balance changes when they list them. A leg
  * they miss is a Soroban token: the sold amount is the call's input amount, and
  * symbols and decimals come from the token catalog or the token's own details.
@@ -315,5 +291,151 @@ export const toAggregatorSwapOperation = async ({
     asset_issuer: received.leg.issuer ?? undefined,
     asset_type: received.leg.type,
     icon_url: received.leg.iconUrl,
+  };
+};
+
+/** Horizon TOID encodes the one-based operation order in its low 12 bits. */
+export const getHistoryOperationIndex = (
+  operation: Horizon.ServerApi.OperationRecord,
+  networkPassphrase: string,
+): number | null => {
+  const record = operation as Horizon.ServerApi.OperationRecord & {
+    operation_index?: number;
+    operationIndex?: number;
+    transaction_attr?: { envelope_xdr?: string };
+  };
+  const explicit = record.operation_index ?? record.operationIndex;
+  if (explicit !== undefined)
+    return Number.isSafeInteger(explicit) && explicit >= 0 ? explicit : null;
+  if (/^[1-9][0-9]*$/.test(record.id)) {
+    const order = Number(BigInt(record.id) % 4096n);
+    if (order > 0) return order - 1;
+  }
+  try {
+    const tx = TransactionBuilder.fromXDR(
+      record.transaction_attr?.envelope_xdr ?? "",
+      networkPassphrase,
+    );
+    const inner = "innerTransaction" in tx ? tx.innerTransaction : tx;
+    return inner.operations.length === 1 ? 0 : null;
+  } catch {
+    return null;
+  }
+};
+
+/** Cached display metadata only; no token or receipt request on the list path. */
+export const getCachedSwapToken = (
+  contractId: string,
+  networkDetails: NetworkDetails,
+  accountBalances: BalanceMap,
+) => {
+  const entry = getCatalog(networkDetails.network)?.[contractId];
+  const balanceEntry = Object.entries(accountBalances).find(
+    ([id]) =>
+      getCatalogContractId(id, networkDetails.networkPassphrase) === contractId,
+  );
+  const balance = balanceEntry?.[1];
+  const native =
+    contractId === getNativeContractId(networkDetails.networkPassphrase);
+  const classic = balance && "token" in balance && !("contractId" in balance);
+  let code = entry?.code || contractId;
+  if (!entry?.code && balance && "token" in balance) code = balance.token.code;
+  if (!entry?.code && balance && "symbol" in balance) code = balance.symbol;
+  if (native) code = "XLM";
+  let issuer = native ? undefined : contractId;
+  if (classic && "issuer" in balance.token) issuer = balance.token.issuer.key;
+  const decimals =
+    native || classic
+      ? 7
+      : (entry?.decimals ??
+        (balance && "decimals" in balance ? balance.decimals : undefined));
+  let type = TokenTypeWithCustomToken.CUSTOM_TOKEN;
+  if (classic) type = classicAssetType(code);
+  if (native) type = TokenTypeWithCustomToken.NATIVE;
+  const icon = useTokenIconsStore.getState().icons[`${code}:${issuer ?? ""}`];
+  return {
+    code,
+    issuer,
+    decimals:
+      decimals !== undefined &&
+      Number.isInteger(decimals) &&
+      decimals >= 0 &&
+      decimals <= 255
+        ? decimals
+        : undefined,
+    type,
+    iconUrl:
+      (entry && getCatalogIconUrl(entry)) ||
+      (icon?.network === networkDetails.network
+        ? icon.lastValidImageUrl || icon.imageUrl
+        : undefined),
+  };
+};
+
+export const toXoxnoSwapOperation = ({
+  operation,
+  publicKey,
+  networkDetails,
+  accountBalances,
+}: {
+  operation: Horizon.ServerApi.OperationRecord;
+  publicKey: string;
+  networkDetails: NetworkDetails;
+  accountBalances: BalanceMap;
+}): Record<string, unknown> | null => {
+  if (operation.transaction_successful === false) return null;
+  const routerAddress = XOXNO_SWAP_ROUTER[networkDetails.network];
+  const record = operation as Horizon.ServerApi.OperationRecord & {
+    transaction_attr?: { envelope_xdr?: string };
+  };
+  const operationIndex = getHistoryOperationIndex(
+    operation,
+    networkDetails.networkPassphrase,
+  );
+  if (!routerAddress || operationIndex === null) return null;
+  const call = decodeStellarSwapEnvelope({
+    envelopeXdr: record.transaction_attr?.envelope_xdr ?? "",
+    networkPassphrase: networkDetails.networkPassphrase,
+    routerAddress,
+    viewer: publicKey,
+    operationIndex,
+  });
+  if (!call) return null;
+  const sent = getCachedSwapToken(
+    call.tokenIn,
+    networkDetails,
+    accountBalances,
+  );
+  const received = getCachedSwapToken(
+    call.tokenOut,
+    networkDetails,
+    accountBalances,
+  );
+  return {
+    ...operation,
+    source_amount:
+      sent.decimals === undefined
+        ? call.amountInAtoms
+        : new BigNumber(call.amountInAtoms).shiftedBy(-sent.decimals).toFixed(),
+    source_asset_code: sent.code,
+    source_asset_issuer: sent.issuer,
+    source_asset_type: sent.type,
+    source_icon_url: sent.iconUrl,
+    amount: "",
+    asset_code: received.code,
+    asset_issuer: received.issuer,
+    asset_type: received.type,
+    icon_url: received.iconUrl,
+    xoxnoReceipt: {
+      network: networkDetails.network,
+      transactionHash: operation.transaction_hash,
+      viewer: publicKey,
+      operationIndex,
+      tokenIn: call.tokenIn,
+      tokenOut: call.tokenOut,
+      sourceAtoms: call.amountInAtoms,
+      sourceDecimals: sent.decimals,
+      destinationDecimals: received.decimals,
+    },
   };
 };

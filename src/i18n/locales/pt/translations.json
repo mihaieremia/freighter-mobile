@@ -324,6 +324,10 @@
       }
     },
     "transactionDetails": {
+      "baseUnits": "unidades base",
+      "receiptUnavailable": "Valor indisponível",
+      "retryReceipt": "Tentar novamente",
+
       "viewOnStellarExpert": "Ver no stellar.expert",
       "fee": "Taxa",
       "status": "Status",

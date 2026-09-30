@@ -12,19 +12,25 @@ import { createDefaultHistoryItemData } from "components/screens/HistoryScreen/m
 import { mapFailedTransactionHistoryItem } from "components/screens/HistoryScreen/mappers/failed";
 import { mapPaymentHistoryItem } from "components/screens/HistoryScreen/mappers/payment";
 import { mapSorobanHistoryItem } from "components/screens/HistoryScreen/mappers/soroban";
-import { mapSwapHistoryItem } from "components/screens/HistoryScreen/mappers/swap";
+import {
+  mapSwapHistoryItem,
+  mapXoxnoSwapHistoryItem,
+} from "components/screens/HistoryScreen/mappers/swap";
 import { HistoryItemData } from "components/screens/HistoryScreen/types";
 import { NetworkDetails, NETWORKS } from "config/constants";
 import { logger } from "config/logger";
 import { BalanceMap } from "config/types";
-import { toAggregatorSwapOperation } from "helpers/aggregatorSwapHistory";
+import {
+  toAggregatorSwapOperation,
+  toXoxnoSwapOperation,
+} from "helpers/aggregatorSwapHistory";
 import { processAssetBalanceChanges } from "helpers/assetBalanceChanges";
 import { formatTransactionDate } from "helpers/date";
 import { getAttrsFromSorobanHorizonOp } from "helpers/soroban";
 import { getStellarExpertUrl } from "helpers/stellarExpert";
 import { ThemeColors } from "hooks/useColors";
 
-interface MapHistoryItemDataProps {
+export interface MapHistoryItemDataProps {
   operation: any;
   accountBalances: BalanceMap;
   publicKey: string;
@@ -32,6 +38,24 @@ interface MapHistoryItemDataProps {
   network: NETWORKS;
   themeColors: ThemeColors;
 }
+
+export const mapInstantXoxnoHistoryItem = (
+  args: MapHistoryItemDataProps,
+): HistoryItemData | null => {
+  const swap = toXoxnoSwapOperation(args);
+  if (!swap) return null;
+  const { operation, network, themeColors } = args;
+  return mapXoxnoSwapHistoryItem({
+    operation: swap,
+    stellarExpertUrl: getStellarExpertUrl(network),
+    date: formatTransactionDate(operation.created_at, false),
+    fee: operation.transaction_attr?.fee_charged ?? "0",
+    memo: operation.transaction_attr?.memo,
+    xdr: operation.transaction_attr?.envelope_xdr ?? "",
+    network,
+    themeColors,
+  });
+};
 
 /**
  * Main mapper function to convert operation data into history item data
@@ -60,6 +84,16 @@ export const mapHistoryItemData = async ({
 
   // Get URL for transaction viewing
   const stellarExpertUrl = getStellarExpertUrl(network);
+
+  const instantSwap = mapInstantXoxnoHistoryItem({
+    operation,
+    accountBalances,
+    publicKey,
+    networkDetails,
+    network,
+    themeColors,
+  });
+  if (instantSwap) return instantSwap;
 
   // Process asset balance changes for all operations
   let assetDiffs: Awaited<ReturnType<typeof processAssetBalanceChanges>> = [];
