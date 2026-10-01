@@ -1,3 +1,4 @@
+/* eslint-disable @fnando/consistent-import/consistent-import */
 import { BigNumber } from "bignumber.js";
 import { NETWORKS } from "config/constants";
 import {
@@ -12,10 +13,17 @@ import {
   useAccountsFiatTotalsStore,
 } from "ducks/accountsFiatTotals";
 import { usePricesStore } from "ducks/prices";
-import { fetchBalances } from "services/backend";
+import {
+  resetTokenCatalogInFlightForTests,
+  useTokenCatalogStore,
+} from "ducks/tokenCatalog";
+import { fetchBalances, fetchTokenCatalog } from "services/backend";
+
+import { catalogSoroban } from "../../__mocks__/tokenCatalog";
 
 jest.mock("services/backend", () => ({
   fetchBalances: jest.fn(),
+  fetchTokenCatalog: jest.fn(),
 }));
 
 jest.mock("ducks/prices", () => ({
@@ -92,6 +100,9 @@ describe("accountsFiatTotals duck", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    resetTokenCatalogInFlightForTests();
+    useTokenCatalogStore.setState({ byNetwork: {} });
+    (fetchTokenCatalog as jest.Mock).mockResolvedValue([]);
     useAccountsFiatTotalsStore.setState({
       fiatTotals: {},
       isLoading: false,
@@ -135,6 +146,68 @@ describe("accountsFiatTotals duck", () => {
     });
   });
 
+  describe("a token only the XOXNO catalog prices", () => {
+    const XAUM_ISSUER = catalogSoroban.id;
+    const xaumBalance = {
+      token: {
+        code: "XAUM",
+        issuer: { key: XAUM_ISSUER },
+        type: TokenTypeWithCustomToken.CUSTOM_TOKEN,
+      },
+      total: new BigNumber("500000000"),
+      decimals: 9,
+    };
+    const xaumId = `XAUM:${XAUM_ISSUER}`;
+
+    const fetchTotal = async () => {
+      await useAccountsFiatTotalsStore.getState().fetchAccountsFiatTotals({
+        publicKeys: [PK_1],
+        network: NETWORKS.PUBLIC,
+        forceRefresh: true,
+      });
+
+      return useAccountsFiatTotalsStore.getState().fiatTotals[PK_1]?.label;
+    };
+
+    beforeEach(() => {
+      mockFetchBalances.mockResolvedValue({
+        balances: { XLM: nativeBalance, [xaumId]: xaumBalance },
+        isFunded: true,
+        subentryCount: 1,
+      } as never);
+    });
+
+    it("adds the catalog's value to the account total", async () => {
+      (fetchTokenCatalog as jest.Mock).mockResolvedValue([catalogSoroban]);
+
+      // 100 XLM * $0.5 + 0.5 XAUM * $4200 = $2150
+      expect(await fetchTotal()).toBe("$2,150.00");
+    });
+
+    it("prefers a price the prices store has", async () => {
+      (fetchTokenCatalog as jest.Mock).mockResolvedValue([catalogSoroban]);
+      mockPricesState({
+        ...mockPrices,
+        [xaumId]: { currentPrice: new BigNumber("10") },
+      });
+
+      // 100 XLM * $0.5 + 0.5 XAUM * $10 = $55
+      expect(await fetchTotal()).toBe("$55.00");
+    });
+
+    it("counts it as zero when the catalog lists it at zero or fails", async () => {
+      (fetchTokenCatalog as jest.Mock).mockResolvedValue([
+        { ...catalogSoroban, priceUsd: 0 },
+      ]);
+      expect(await fetchTotal()).toBe("$50.00");
+
+      resetTokenCatalogInFlightForTests();
+      useTokenCatalogStore.setState({ byNetwork: {} });
+      (fetchTokenCatalog as jest.Mock).mockRejectedValue(new Error("down"));
+      expect(await fetchTotal()).toBe("$50.00");
+    });
+  });
+
   it("counts unpriced tokens as zero", async () => {
     mockPricesState({
       XLM: {
@@ -151,9 +224,9 @@ describe("accountsFiatTotals duck", () => {
     });
 
     // Only XLM priced: 100 * $0.5
-    expect(
-      useAccountsFiatTotalsStore.getState().fiatTotals[PK_1]?.label,
-    ).toBe("$50.00");
+    expect(useAccountsFiatTotalsStore.getState().fiatTotals[PK_1]?.label).toBe(
+      "$50.00",
+    );
   });
 
   it("returns zero for unfunded accounts (empty balances)", async () => {
@@ -170,9 +243,9 @@ describe("accountsFiatTotals duck", () => {
       network: NETWORKS.PUBLIC,
     });
 
-    expect(
-      useAccountsFiatTotalsStore.getState().fiatTotals[PK_1]?.label,
-    ).toBe("$0.00");
+    expect(useAccountsFiatTotalsStore.getState().fiatTotals[PK_1]?.label).toBe(
+      "$0.00",
+    );
   });
 
   it("isolates per-account fetch failures behind the placeholder", async () => {
@@ -513,9 +586,9 @@ describe("accountsFiatTotals duck", () => {
     });
 
     expect(mockFetchBalances).toHaveBeenCalledTimes(2);
-    expect(
-      useAccountsFiatTotalsStore.getState().fiatTotals[PK_1]?.label,
-    ).toBe("$250.00");
+    expect(useAccountsFiatTotalsStore.getState().fiatTotals[PK_1]?.label).toBe(
+      "$250.00",
+    );
   });
 
   describe("syncAccountFiatTotal", () => {

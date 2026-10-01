@@ -9,6 +9,7 @@ import { NETWORKS } from "config/constants";
 import { TokenTypeWithCustomToken } from "config/types";
 import React from "react";
 
+import { ISSUER } from "../../../../../__mocks__/swapFixtures";
 import { mockUseColors } from "../../../../../__mocks__/use-colors";
 
 mockUseColors();
@@ -23,29 +24,42 @@ jest.mock("hooks/useClipboard", () => ({
   }),
 }));
 
+const mockOpenInAppBrowser = jest.fn();
+
 jest.mock("hooks/useInAppBrowser", () => ({
   useInAppBrowser: () => ({
-    open: jest.fn(),
+    open: mockOpenInAppBrowser,
   }),
 }));
 
+let mockActions: { title: string; onPress: () => void }[] = [];
+
 jest.mock("components/ContextMenuButton", () => ({
   __esModule: true,
-  default: () => null,
+  default: ({
+    contextMenuProps,
+  }: {
+    contextMenuProps: { actions: { title: string; onPress: () => void }[] };
+  }) => {
+    mockActions = contextMenuProps.actions;
+
+    return null;
+  },
 }));
 
 jest.mock("helpers/soroban", () => ({
+  ...jest.requireActual("helpers/soroban"),
   getNativeContractDetails: () => ({ contract: "CNATIVE..." }),
 }));
 
 describe("TokenContextMenu — widened prop shape", () => {
   it("accepts a PricedBalance-like token with nested token.issuer.key", () => {
     const heldToken: TokenReference = {
-      id: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      id: `USDC:${ISSUER}`,
       tokenCode: "USDC",
       token: {
         issuer: {
-          key: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+          key: ISSUER,
         },
       },
       tokenType: TokenTypeWithCustomToken.CREDIT_ALPHANUM4,
@@ -58,7 +72,7 @@ describe("TokenContextMenu — widened prop shape", () => {
   it("accepts a FormattedSearchTokenRecord-like token (non-held)", () => {
     const searchToken: TokenReference = {
       tokenCode: "USDC",
-      issuer: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      issuer: ISSUER,
       tokenType: TokenTypeWithCustomToken.CREDIT_ALPHANUM4,
     };
     expect(() =>
@@ -108,26 +122,26 @@ describe("getContractAddress — branch coverage", () => {
 
   it("returns nested token.issuer.key for PricedBalance shape (branch 2)", () => {
     const balance: TokenReference = {
-      id: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      id: `USDC:${ISSUER}`,
       token: {
         issuer: {
-          key: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+          key: ISSUER,
         },
       },
       tokenType: TokenTypeWithCustomToken.CREDIT_ALPHANUM4,
     };
     expect(getContractAddress({ balance, network: NETWORKS.PUBLIC })).toBe(
-      "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      ISSUER,
     );
   });
 
   it("returns flat issuer for FormattedSearchTokenRecord shape (branch 3)", () => {
     const balance: TokenReference = {
-      issuer: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      issuer: ISSUER,
       tokenType: TokenTypeWithCustomToken.CREDIT_ALPHANUM4,
     };
     expect(getContractAddress({ balance, network: NETWORKS.PUBLIC })).toBe(
-      "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      ISSUER,
     );
   });
 
@@ -147,5 +161,50 @@ describe("getContractAddress — branch coverage", () => {
     expect(
       getContractAddress({ balance, network: NETWORKS.PUBLIC }),
     ).toBeNull();
+  });
+});
+
+describe("TokenContextMenu — View on Stellar Expert link", () => {
+  const CONTRACT = "CBSJZEIO5C7KC2SF3MKSNXXJSW5G3VTNBX4ATMKUI3B2MR4JKM4R26YF";
+
+  const openLink = async (token: TokenReference) => {
+    render(<TokenContextMenu token={token} network={NETWORKS.PUBLIC} />);
+    mockActions
+      .find((a) => a.title === "swapScreen.viewOnStellarExpert")!
+      .onPress();
+    await Promise.resolve();
+  };
+
+  beforeEach(() => {
+    mockOpenInAppBrowser.mockClear();
+  });
+
+  it.each([
+    ["listed with its contract as issuer", { issuer: CONTRACT }],
+    ["that carries its contractId", { contractId: CONTRACT }],
+  ])("opens the contract page for a Soroban token %s", async (_title, ref) => {
+    await openLink({
+      id: `SolvBTC:${CONTRACT}`,
+      tokenCode: "SolvBTC",
+      ...ref,
+      tokenType: TokenTypeWithCustomToken.CUSTOM_TOKEN,
+    });
+
+    expect(mockOpenInAppBrowser).toHaveBeenCalledWith(
+      `https://stellar.expert/explorer/public/contract/${CONTRACT}`,
+    );
+  });
+
+  it("opens the asset page for a classic asset", async () => {
+    await openLink({
+      id: `USDC:${ISSUER}`,
+      tokenCode: "USDC",
+      issuer: ISSUER,
+      tokenType: TokenTypeWithCustomToken.CREDIT_ALPHANUM4,
+    });
+
+    expect(mockOpenInAppBrowser).toHaveBeenCalledWith(
+      `https://stellar.expert/explorer/public/asset/USDC-${ISSUER}`,
+    );
   });
 });

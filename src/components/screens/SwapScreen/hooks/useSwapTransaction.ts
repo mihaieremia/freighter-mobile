@@ -2,6 +2,7 @@ import Blockaid from "@blockaid/client";
 import { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import BigNumber from "bignumber.js";
 import {
+  addBoughtTokenToBalances,
   getQuoteExpiredOperationCodes,
   getTokenFromBalance,
   isStaleAggregatorQuote,
@@ -27,6 +28,7 @@ import { usePricesStore } from "ducks/prices";
 import { useRemoteConfigStore } from "ducks/remoteConfig";
 import { SwapPathResult, useSwapStore } from "ducks/swap";
 import { useSwapSettingsStore } from "ducks/swapSettings";
+import { useTokenCatalogStore } from "ducks/tokenCatalog";
 import {
   SubmitResultCodes,
   SubmitTransactionOutcome,
@@ -37,6 +39,7 @@ import {
   ConfirmationSnapshotHandle,
   startConfirmationPriceSnapshot,
 } from "helpers/confirmationPriceSnapshot";
+import { withCatalogPrices } from "helpers/tokenCatalog";
 import {
   AssetIdentity,
   canonicalIdFromIdentity,
@@ -646,7 +649,12 @@ export const useSwapTransaction = ({
         const destinationDescriptor = useSwapStore.getState().destinationToken;
         const destinationDisplayPrice = resolveDestinationDisplayPrice({
           balance: freshDest,
-          prices: withDescriptorPrice(displayPrices, destinationDescriptor),
+          prices: withCatalogPrices(
+            withDescriptorPrice(displayPrices, destinationDescriptor),
+            [destinationDescriptor?.id],
+            useTokenCatalogStore.getState().byNetwork[network]?.byContractId,
+            network,
+          ),
           descriptor: destinationDescriptor,
         });
 
@@ -721,6 +729,14 @@ export const useSwapTransaction = ({
           destToken: destinationTokenInput.tokenCode,
           quotedDestinationAmount: signedDestinationAmount,
           allowedSlippage: freshSwapSlippage?.toString(),
+        });
+
+        // A Soroban token bought in this swap has no trustline to add, so list it in
+        // the user's balances once the swap has settled.
+        await addBoughtTokenToBalances({
+          token: destinationDescriptor,
+          publicKey: account.publicKey,
+          network,
         });
 
         // Fire SWAP_TRUSTLINE_ADDED when the combined changeTrust +

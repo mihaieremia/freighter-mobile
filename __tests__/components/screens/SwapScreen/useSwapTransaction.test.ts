@@ -11,6 +11,7 @@ import { NETWORKS } from "config/constants";
 import { TokenTypeWithCustomToken } from "config/types";
 import type { ActiveAccount } from "ducks/auth";
 import { SwapPathResult, useSwapStore } from "ducks/swap";
+import { useTokenCatalogStore } from "ducks/tokenCatalog";
 import { isWalletUnlocked } from "hooks/useGetActiveAccount";
 import { analytics } from "services/analytics";
 import { SwapQuoteSource } from "services/backend";
@@ -23,6 +24,7 @@ import {
   usdc,
   xlm,
 } from "../../../../__mocks__/swapFixtures";
+import { catalogXaum, seedCatalog } from "../../../../__mocks__/tokenCatalog";
 
 const mockSignTransaction = jest.fn();
 const mockSubmitTransaction = jest.fn();
@@ -32,6 +34,7 @@ const mockBuildTrustlineTransaction = jest
   .mockResolvedValue("trustline-xdr");
 const mockPrepareAggregatorSwap = jest.fn().mockReturnValue("aggregator-xdr");
 const mockFetchSwapQuote = jest.fn();
+const mockAddBoughtTokenToBalances = jest.fn();
 const mockShowToast = jest.fn();
 const mockTrackTransactionError = jest.fn();
 const mockTrackSwapSuccess = jest.fn();
@@ -94,6 +97,10 @@ jest.mock("services/backend", () => ({
   ...jest.requireActual("services/backend"),
   fetchTokenPrices: (...args: unknown[]) => mockFetchTokenPrices(...args),
   fetchSwapQuote: (...args: unknown[]) => mockFetchSwapQuote(...args),
+}));
+jest.mock("components/screens/SwapScreen/helpers/swapInventory", () => ({
+  addBoughtTokenToBalances: (...args: unknown[]) =>
+    mockAddBoughtTokenToBalances(...args),
 }));
 // `signTransaction` is mocked to return the literal string "signed-xdr" in
 // most of this file's tests, which isn't parseable XDR — stub
@@ -243,6 +250,7 @@ describe("useSwapTransaction", () => {
     act(() => {
       useSwapStore.getState().resetSwap();
       useSwapStore.setState({ pathResult: baseParams.pathResult });
+      useTokenCatalogStore.setState({ byNetwork: {} });
     });
   });
 
@@ -1274,7 +1282,7 @@ describe("useSwapTransaction", () => {
         expect(mockSubmitTransaction).toHaveBeenCalledTimes(1);
       });
 
-      it("signs and sends the verified aggregator transaction once", async () => {
+      it("signs and sends the verified aggregator transaction once and lists the bought token", async () => {
         const path = quote();
         seed(path);
 
@@ -1283,6 +1291,39 @@ describe("useSwapTransaction", () => {
         expect(mockSignTransaction).toHaveBeenCalledTimes(1);
         expect(mockSubmitTransaction).toHaveBeenCalledTimes(1);
         expect(mockTrackSwapSuccess).toHaveBeenCalled();
+        expect(mockAddBoughtTokenToBalances).toHaveBeenCalledWith({
+          token: expect.objectContaining({ tokenCode: "USDC" }),
+          publicKey: SENDER,
+          network: NETWORKS.PUBLIC,
+        });
+      });
+
+      it("keeps the bought token identity when Close resets the swap during submission", async () => {
+        const path = quote();
+        seed(path);
+        const { destinationToken } = useSwapStore.getState();
+        mockSubmitTransaction.mockImplementationOnce(() => {
+          useSwapStore.getState().resetSwap();
+          return Promise.resolve(submitOk());
+        });
+
+        await run(path, "executeSwap");
+
+        expect(mockAddBoughtTokenToBalances).toHaveBeenCalledWith({
+          token: destinationToken,
+          publicKey: SENDER,
+          network: NETWORKS.PUBLIC,
+        });
+      });
+
+      it("does not touch the balances when the swap fails", async () => {
+        mockSubmitTransaction.mockResolvedValue(submitFailed());
+        const path = quote();
+        seed(path);
+
+        await run(path, "executeSwap");
+
+        expect(mockAddBoughtTokenToBalances).not.toHaveBeenCalled();
       });
 
       it("does not send the swap when signing is refused", async () => {
@@ -1293,6 +1334,7 @@ describe("useSwapTransaction", () => {
         await run(path, "executeSwap");
 
         expect(mockSubmitTransaction).not.toHaveBeenCalled();
+        expect(mockAddBoughtTokenToBalances).not.toHaveBeenCalled();
         expect(mockTrackTransactionError).toHaveBeenCalledWith(
           expect.objectContaining({ isSwap: true }),
         );
