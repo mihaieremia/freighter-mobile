@@ -17,8 +17,6 @@ import {
 } from "components/screens/SwapScreen/components";
 import {
   buildDestinationPickerToken,
-  buildReceiveTexts,
-  resolveDestinationDisplayPrice,
   buildSellSecondaryText,
   buildSourceBalanceRight,
   recordTokenId,
@@ -29,6 +27,7 @@ import {
   SWAP_TOAST_IDS,
   useDefaultSwapDestination,
   useSwapAmountError,
+  useSwapAmountInputs,
   useSwapBalances,
   useSwapCtaState,
   useSwapDirectionToggle,
@@ -63,11 +62,7 @@ import { useSwapSettingsStore } from "ducks/swapSettings";
 import { useTransactionBuilderStore } from "ducks/transactionBuilder";
 import { isNativeAssetId } from "helpers/assetIdentity";
 import { calculateSpendableAmount } from "helpers/balances";
-import {
-  formatFiatAmount,
-  getBalanceDecimals,
-  toDecimalAmount,
-} from "helpers/formatAmount";
+import { getBalanceDecimals, toDecimalAmount } from "helpers/formatAmount";
 import { waitForKeyboardDismiss } from "helpers/keyboard";
 import useAppTranslation from "hooks/useAppTranslation";
 import { type HeldBalanceItem, useBalancesList } from "hooks/useBalancesList";
@@ -151,8 +146,8 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
     sourceTokenSymbol,
     sourceAmount,
     destinationAmount,
-    setSourceAmount,
-    setSourceAmountDisplay,
+    inputSide,
+    destinationInputAmount,
     pathResult,
     isLoadingPath,
     pathError,
@@ -161,8 +156,6 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
     resetSwap,
   } = useSwapStore();
 
-  const inputSide = SwapInputSide.SOURCE;
-  const destinationInputAmount = "0";
   const { sourceBalance, destinationBalance, bestNonXlmClassicBalance } =
     useSwapBalances({
       balanceItems,
@@ -313,17 +306,20 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
     extraTokenIds: extraPriceIds,
   });
 
-  const sellCardConverter = converter;
-  const setSellTokenAmount = converter.setTokenAmount;
-  useEffect(() => {
-    setSourceAmount(converter.tokenAmount);
-    setSourceAmountDisplay(converter.tokenAmountDisplay);
-  }, [
-    converter.tokenAmount,
-    converter.tokenAmountDisplay,
-    setSourceAmount,
-    setSourceAmountDisplay,
-  ]);
+  const {
+    sellCardConverter,
+    receiveCardConverter,
+    setSellTokenAmount,
+    hasReceivePrice,
+    receiveSecondaryText,
+  } = useSwapAmountInputs({
+    sellConverter: converter,
+    sourceBalance,
+    destinationForPath,
+    destinationBalance,
+    destinationTokenDescriptor,
+    prices,
+  });
 
   // Pull-to-refresh state for the Trending list. On failure, surface a
   // toast so the user knows the cached list they're seeing is stale; on
@@ -833,19 +829,6 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
     destinationBalance,
     destinationTokenDescriptor,
   });
-  const destinationPrice = resolveDestinationDisplayPrice({
-    balance: destinationBalance,
-    prices: withDescriptorPrice(prices, destinationTokenDescriptor),
-    descriptor: destinationTokenDescriptor,
-  });
-  const { receiveBigText, receiveSmallText } = buildReceiveTexts({
-    showFiatAmount,
-    destinationAmount,
-    destinationFiat:
-      destinationPrice?.multipliedBy(destinationAmount || "0") ?? undefined,
-    hasDestinationPrice: !!destinationPrice,
-    destinationTokenLabel,
-  });
   const sourceBalanceRight = buildSourceBalanceRight({
     sourceBalance,
     sourceTokenSymbol,
@@ -898,7 +881,7 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
 
       {/* Receive card */}
       <AmountCard
-        mode="readonly"
+        mode="editable"
         testID="swap-receive-card"
         label={t("swapScreen.youReceive")}
         selectedToken={destinationPickerToken}
@@ -920,11 +903,13 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
             ? "swap-receive-pill"
             : "swap-receive-choose-pill"
         }
-        primaryAmount={destinationTokenDescriptor ? receiveBigText : "0"}
-        secondaryAmount={
-          destinationTokenDescriptor ? receiveSmallText : formatFiatAmount("0")
-        }
-        placeholderActive={!destinationTokenDescriptor}
+        inputTestID="swap-receive-amount-input"
+        focusTriggerTestID="swap-receive-amount-focus-trigger"
+        fiatToggleTestID="swap-receive-amount-fiat-toggle"
+        accessibilityLabel={t("swapScreen.youReceive")}
+        converter={receiveCardConverter}
+        hasUsdPrice={hasReceivePrice}
+        secondaryAmountText={receiveSecondaryText}
       />
 
       <View className="items-center mt-[24px]">
