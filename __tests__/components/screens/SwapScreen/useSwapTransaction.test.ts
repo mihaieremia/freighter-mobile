@@ -15,7 +15,16 @@ import { useTokenCatalogStore } from "ducks/tokenCatalog";
 import { isWalletUnlocked } from "hooks/useGetActiveAccount";
 import { analytics } from "services/analytics";
 import { SwapQuoteSource } from "services/backend";
+import { fetchTransactionMeta } from "services/stellarExpert";
 
+import {
+  poolErrorFailedMeta,
+  routerSlippageFailedMeta,
+} from "../../../../__mocks__/routerFailedSwap";
+import {
+  SWAPPER,
+  XAUM_CONTRACT,
+} from "../../../../__mocks__/routerSwapHistory";
 import {
   BACKEND_ENVELOPE,
   ISSUER,
@@ -92,9 +101,16 @@ jest.mock("ducks/prices", () => ({
 }));
 // Stubs the network boundary only — startConfirmationPriceSnapshot itself
 // runs for real, so its cancel()/resolve() contract is still exercised.
+const mockFetchSwapReceipt = jest.fn();
+const mockDecodeSwapEnvelope = jest.fn();
+jest.mock("@xoxno/stellar-swap", () => ({
+  ...jest.requireActual("@xoxno/stellar-swap"),
+  decodeSwapEnvelope: (...args: unknown[]) => mockDecodeSwapEnvelope(...args),
+}));
 const mockFetchTokenPrices = jest.fn().mockResolvedValue({});
 jest.mock("services/backend", () => ({
   ...jest.requireActual("services/backend"),
+  fetchSwapReceipt: (...args: unknown[]) => mockFetchSwapReceipt(...args),
   fetchTokenPrices: (...args: unknown[]) => mockFetchTokenPrices(...args),
   fetchSwapQuote: (...args: unknown[]) => mockFetchSwapQuote(...args),
 }));
@@ -117,6 +133,10 @@ jest.mock("@stellar/stellar-sdk", () => {
     },
   };
 });
+
+const mockFetchTransactionMeta = fetchTransactionMeta as jest.MockedFunction<
+  typeof fetchTransactionMeta
+>;
 
 jest.mock("ducks/swapSettings", () => ({
   useSwapSettingsStore: Object.assign(() => ({}), {
@@ -247,6 +267,7 @@ describe("useSwapTransaction", () => {
       error: "Submit error from store",
     });
     mockPricesByNetwork = {};
+    mockFetchTransactionMeta.mockReset().mockResolvedValue(null);
     act(() => {
       useSwapStore.getState().resetSwap();
       useSwapStore.setState({ pathResult: baseParams.pathResult });
@@ -1341,6 +1362,403 @@ describe("useSwapTransaction", () => {
         expect(mockShowToast).toHaveBeenCalledWith(
           expect.objectContaining({ variant: "error" }),
         );
+      });
+
+      describe("a rejected aggregator swap", () => {
+        const HASH_BYTES = new Uint8Array(32).fill(0xab);
+        const HASH_HEX = "ab".repeat(32);
+
+        const trapped = (
+          overrides: Parameters<typeof submitFailed>[0] = {},
+        ) => ({
+          ...rejected("function_trapped"),
+          ...overrides,
+        });
+
+        /** Runs the swap; `during` fires timers while it waits on the lookup. */
+        const executeRejected = async (
+          outcome: ReturnType<typeof submitFailed>,
+          during: (pending: Promise<void>) => Promise<unknown> = () =>
+            Promise.resolve(),
+        ) => {
+          (
+            TransactionBuilder.fromXdr as unknown as jest.Mock
+          ).mockReturnValueOnce({ operations: [], hash: () => HASH_BYTES });
+          mockSubmitTransaction.mockResolvedValue(outcome);
+          mockFetchSwapQuote.mockResolvedValue(backendQuote());
+          const path = quote();
+          seed(path);
+          const { result } = renderHook(() =>
+            useSwapTransaction(paramsFor(path)),
+          );
+
+          await act(async () => {
+            const pending = executeReviewed(result);
+            await during(pending);
+            await pending;
+          });
+        };
+
+        const expectGenericFailure = () => {
+          expect(mockTrackTransactionError).toHaveBeenCalledTimes(1);
+          expect(mockTrackTransactionError).toHaveBeenCalledWith(
+            expect.objectContaining({
+              isSwap: true,
+              errorCode: "function_trapped",
+              volume: expect.objectContaining({
+                reasonCode: "function_trapped",
+                failureCategory: "protocol_other",
+              }),
+            }),
+          );
+          expect(mockTrack).not.toHaveBeenCalledWith(
+            AnalyticsEvent.SWAP_QUOTE_EXPIRED,
+            expect.anything(),
+          );
+          expect(mockShowToast).toHaveBeenCalledWith(
+            expect.objectContaining({ toastId: "swap-transaction-failed" }),
+          );
+          expect(mockFetchSwapQuote).not.toHaveBeenCalled();
+          expect(mockTrackSwapSuccess).not.toHaveBeenCalled();
+        };
+
+        it.each([
+          [
+            "an operation failure that is not a trap",
+            rejected("op_underfunded"),
+          ],
+          ["a stale sequence number", rejected(undefined, "tx_bad_seq")],
+          ["an expired transaction", rejected(undefined, "tx_too_late")],
+          [
+            "a trap reported with a 5xx, an undetermined outcome",
+            trapped({ httpStatus: 504 }),
+          ],
+          [
+            "a trap reported with no protocol answer",
+            trapped({ isProtocolAnswer: false }),
+          ],
+          [
+            "a 504 with no result codes",
+            submitFailed({ httpStatus: 504, isProtocolAnswer: true }),
+          ],
+          ["a transport error", submitFailed()],
+        ])("does not look anything up for %s", async (_name, outcome) => {
+          await executeRejected(outcome);
+
+          expect(mockFetchTransactionMeta).not.toHaveBeenCalled();
+          expect(mockTrack).not.toHaveBeenCalledWith(
+            AnalyticsEvent.SWAP_QUOTE_EXPIRED,
+            expect.anything(),
+          );
+          expect(mockTrackTransactionError).toHaveBeenCalledTimes(1);
+        });
+
+        it("treats a router SlippageExceeded as an expired quote: event, category, toast and a fresh quote", async () => {
+          mockFetchTransactionMeta.mockResolvedValue(routerSlippageFailedMeta);
+
+          await executeRejected(trapped());
+
+          expect(mockFetchTransactionMeta).toHaveBeenCalledTimes(1);
+          expect(mockFetchTransactionMeta).toHaveBeenCalledWith(
+            HASH_HEX,
+            NETWORKS.PUBLIC,
+            { retries: 1, initialDelay: 2000 },
+          );
+          expect(mockTrack).toHaveBeenCalledWith(
+            AnalyticsEvent.SWAP_QUOTE_EXPIRED,
+            {
+              from_asset_code: "XLM",
+              to_asset_code: "USDC",
+              result_code: "SlippageExceeded",
+            },
+          );
+          expect(mockTrackTransactionError).toHaveBeenCalledTimes(1);
+          expect(mockTrackTransactionError).toHaveBeenCalledWith(
+            expect.objectContaining({
+              isSwap: true,
+              errorCode: "SlippageExceeded",
+              volume: expect.objectContaining({
+                reasonCode: "SlippageExceeded",
+                failureCategory: "slippage",
+              }),
+            }),
+          );
+          expect(mockShowToast).toHaveBeenCalledWith(
+            expect.objectContaining({
+              title: "swapScreen.errors.quoteExpired",
+              toastId: "swap-quote-expired",
+            }),
+          );
+          expect(mockFetchSwapQuote).toHaveBeenCalledTimes(1);
+          expect(mockTrackSwapSuccess).not.toHaveBeenCalled();
+        });
+
+        it("keeps the generic failure when Stellar Expert has no meta", async () => {
+          await executeRejected(trapped());
+
+          expect(mockFetchTransactionMeta).toHaveBeenCalledTimes(1);
+          expectGenericFailure();
+        });
+
+        it("keeps the generic failure once the lookup budget is spent on a hung request", async () => {
+          jest.useFakeTimers();
+          mockFetchTransactionMeta.mockReturnValue(new Promise(() => {}));
+          let settled = false;
+
+          await executeRejected(trapped(), async (pending) => {
+            pending.then(() => {
+              settled = true;
+            });
+            await jest.advanceTimersByTimeAsync(5999);
+            expect(settled).toBe(false);
+            await jest.advanceTimersByTimeAsync(1);
+          });
+
+          expect(mockFetchTransactionMeta).toHaveBeenCalledTimes(1);
+          expectGenericFailure();
+        });
+
+        it("keeps the generic failure when the router's error is not a slippage error", async () => {
+          mockFetchTransactionMeta.mockResolvedValue(poolErrorFailedMeta);
+
+          await executeRejected(trapped());
+
+          expect(mockFetchTransactionMeta).toHaveBeenCalledTimes(1);
+          expectGenericFailure();
+        });
+
+        it("keeps the generic failure when the meta cannot be decoded", async () => {
+          mockFetchTransactionMeta.mockResolvedValue("not-xdr");
+
+          await executeRejected(trapped());
+
+          expectGenericFailure();
+        });
+      });
+
+      describe("the settled destination amount", () => {
+        // A Soroban token bought through the router: 1608622 base units of a
+        // 9-decimal token reached the swapper (usdcToXaumMeta), at $4000.
+        const XAUM_AMOUNT = "0.001608622";
+        const xaum = {
+          id: `XAUM:${XAUM_CONTRACT}`,
+          tokenCode: "XAUM",
+          contractId: XAUM_CONTRACT,
+          symbol: "XAUM",
+          decimals: 9,
+          token: {
+            type: "custom_token",
+            code: "XAUM",
+            issuer: { key: XAUM_CONTRACT },
+          },
+        } as never;
+
+        /** A TransactionResult XDR of an aggregator transaction: no path payment, whole transaction succeeded or failed. */
+        const invokeResultXdr = (succeeded: boolean): string =>
+          new xdr.TransactionResult({
+            feeCharged: BigInt("100"),
+            result: succeeded
+              ? xdr.TransactionResultResult.txSuccess([])
+              : xdr.TransactionResultResult.txFailed([]),
+            ext: xdr.TransactionResultExt.v0(),
+          }).toXdr("base64");
+
+        const xaumDescriptor = (priceUsd?: number) => ({
+          id: `XAUM:${XAUM_CONTRACT}`,
+          tokenCode: "XAUM",
+          issuer: XAUM_CONTRACT,
+          decimals: 9,
+          tokenType: TokenTypeWithCustomToken.CUSTOM_TOKEN,
+          requiresTrustline: false,
+          priceUsd,
+        });
+
+        const executeIntoXaum = async ({
+          network = NETWORKS.PUBLIC,
+          descriptorPriceUsd,
+        }: { network?: NETWORKS; descriptorPriceUsd?: number } = {}) => {
+          const path = quote({ destinationAmount: "0.0016" });
+          seed(path);
+          act(() => {
+            useSwapStore
+              .getState()
+              .setDestinationToken(xaumDescriptor(descriptorPriceUsd));
+            useSwapStore.setState({ pathResult: path });
+          });
+          const { result } = renderHook(() =>
+            useSwapTransaction({
+              ...paramsFor(path),
+              network,
+              destinationTokenInput: xaum,
+              account: {
+                publicKey: SWAPPER,
+                privateKey: "SA...",
+              } as ActiveAccount,
+            }),
+          );
+          await act(async () => {
+            await executeReviewed(result);
+          });
+        };
+
+        const reportedVolume = () => {
+          expect(mockTrackSwapSuccess).toHaveBeenCalledTimes(1);
+          const [payload] = mockTrackSwapSuccess.mock.calls[0] as [
+            { volume: Record<string, unknown> },
+          ];
+
+          return payload.volume;
+        };
+
+        beforeEach(() => {
+          mockDecodeSwapEnvelope.mockReturnValue({ operationIndex: 0 });
+          mockFetchSwapReceipt.mockReset().mockResolvedValue({
+            status: "confirmed",
+            receivedAtoms: "1608622",
+          });
+          mockFetchTransactionMeta.mockReset().mockResolvedValue(null);
+          mockPricesByNetwork = {
+            [NETWORKS.PUBLIC]: {
+              XLM: { currentPrice: new BigNumber("0.5") },
+              [`XAUM:${XAUM_CONTRACT}`]: {
+                currentPrice: new BigNumber("4000"),
+              },
+            },
+          };
+          mockFetchTokenPrices.mockRejectedValue(new Error("no prices"));
+        });
+
+        it("reads actual backend receipt output, priced and compared with the quote", async () => {
+          mockSubmitTransaction.mockResolvedValue(
+            submitOk(invokeResultXdr(true)),
+          );
+
+          await executeIntoXaum();
+
+          expect(reportedVolume()).toMatchObject({
+            toAmount: Number(XAUM_AMOUNT),
+            toAmountQuoted: 0.0016,
+            toAmountUsdStatus: "ok",
+            toAmountUsd: 6.43,
+            toAmountUsdRate: 4000,
+            executionSlippagePct: 0.54,
+          });
+          expect(mockFetchTransactionMeta).not.toHaveBeenCalled();
+        });
+
+        it("reports unavailable receipts without inventing an amount", async () => {
+          mockFetchSwapReceipt.mockResolvedValue({ status: "unavailable" });
+          mockSubmitTransaction.mockResolvedValue(
+            submitOk(invokeResultXdr(true)),
+          );
+
+          await executeIntoXaum();
+
+          const volume = reportedVolume();
+          expect(volume).toMatchObject({ toAmountUsdStatus: "error" });
+          expect(volume).not.toHaveProperty("toAmount");
+          expect(volume).not.toHaveProperty("executionSlippagePct");
+          expect(mockFetchSwapReceipt).toHaveBeenCalledTimes(1);
+        });
+
+        it("finishes the swap before a slow receipt request", async () => {
+          let resolveReceipt: (receipt: unknown) => void = () => {};
+          mockFetchSwapReceipt.mockReturnValue(
+            new Promise<unknown>((resolve) => {
+              resolveReceipt = resolve;
+            }),
+          );
+          mockSubmitTransaction.mockResolvedValue(
+            submitOk(invokeResultXdr(true)),
+          );
+
+          await executeIntoXaum();
+
+          // Receipt enrichment outlives the user-visible flow.
+          expect(mockAddBoughtTokenToBalances).toHaveBeenCalledTimes(1);
+          expect(mockShowToast).not.toHaveBeenCalled();
+          expect(mockTrackSwapSuccess).not.toHaveBeenCalled();
+
+          await act(async () => {
+            resolveReceipt({ status: "confirmed", receivedAtoms: "1608622" });
+            await Promise.resolve();
+          });
+
+          expect(reportedVolume()).toMatchObject({
+            toAmount: Number(XAUM_AMOUNT),
+            toAmountUsdStatus: "ok",
+          });
+        });
+
+        it("prices a non-held Soroban destination at the catalog's price when nothing else has one", async () => {
+          mockPricesByNetwork = {
+            [NETWORKS.PUBLIC]: { XLM: { currentPrice: new BigNumber("0.5") } },
+          };
+          seedCatalog(NETWORKS.PUBLIC, catalogXaum({ priceUsd: 4000 }));
+          mockSubmitTransaction.mockResolvedValue(
+            submitOk(invokeResultXdr(true)),
+          );
+
+          await executeIntoXaum();
+
+          expect(reportedVolume()).toMatchObject({
+            priceFreshness: "cached_display",
+            toAmountUsdStatus: "ok",
+            toAmountUsd: 6.43,
+            toAmountUsdRate: 4000,
+          });
+        });
+
+        it("keeps the prices store ahead of the catalog", async () => {
+          seedCatalog(NETWORKS.PUBLIC, catalogXaum({ priceUsd: 1 }));
+          mockSubmitTransaction.mockResolvedValue(
+            submitOk(invokeResultXdr(true)),
+          );
+
+          await executeIntoXaum();
+
+          expect(reportedVolume()).toMatchObject({ toAmountUsdRate: 4000 });
+        });
+
+        it("leaves the destination unpriced off mainnet, catalog or not", async () => {
+          mockPricesByNetwork = {};
+          seedCatalog(NETWORKS.TESTNET, catalogXaum({ priceUsd: 4000 }));
+          mockSubmitTransaction.mockResolvedValue(
+            submitOk(invokeResultXdr(true)),
+          );
+
+          await executeIntoXaum({ network: NETWORKS.TESTNET });
+
+          const volume = reportedVolume();
+          expect(volume).toMatchObject({ toAmountUsdStatus: "no_price" });
+          expect(volume).not.toHaveProperty("toAmountUsdRate");
+        });
+
+        it("keeps success when the receipt request fails", async () => {
+          mockFetchSwapReceipt.mockRejectedValue(new Error("unavailable"));
+          mockSubmitTransaction.mockResolvedValue(
+            submitOk(invokeResultXdr(true)),
+          );
+
+          await executeIntoXaum();
+
+          expect(reportedVolume()).toMatchObject({
+            toAmountUsdStatus: "error",
+          });
+          expect(mockFetchTransactionMeta).not.toHaveBeenCalled();
+        });
+
+        it("reads nothing from a result that is not a success", async () => {
+          mockSubmitTransaction.mockResolvedValue(
+            submitOk(invokeResultXdr(false)),
+          );
+
+          await executeIntoXaum();
+
+          const volume = reportedVolume();
+          expect(volume).toMatchObject({ toAmountUsdStatus: "error" });
+          expect(volume).not.toHaveProperty("toAmount");
+        });
       });
 
       it("stops before signing when adopted envelope expired during review", async () => {

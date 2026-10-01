@@ -1,6 +1,9 @@
 /* eslint-disable no-underscore-dangle */
 import { NETWORKS } from "config/constants";
-import { fetchTrendingAssets } from "services/stellarExpert";
+import {
+  fetchTrendingAssets,
+  fetchTransactionMeta,
+} from "services/stellarExpert";
 
 // Override the global jest.setup.js mock so we test the real implementation
 // with only the underlying API calls intercepted.
@@ -12,6 +15,7 @@ jest.mock("services/apiFactory", () => {
   const get = jest.fn();
   return {
     createApiService: jest.fn(() => ({ get })),
+    isApiError: jest.requireActual("services/apiFactory").isApiError,
     isRequestCanceled: jest.fn(() => false),
     logApiError: jest.fn(),
     __get: get, // expose for assertions
@@ -24,6 +28,7 @@ const apiFactory = require("services/apiFactory");
 describe("stellarExpert service", () => {
   beforeEach(() => {
     apiFactory.__get.mockReset();
+    apiFactory.logApiError.mockClear();
   });
 
   describe("fetchTrendingAssets", () => {
@@ -63,6 +68,49 @@ describe("stellarExpert service", () => {
       expect(apiFactory.__get).toHaveBeenCalledWith(
         "/asset",
         expect.objectContaining({ signal: controller.signal }),
+      );
+    });
+  });
+
+  describe("fetchTransactionMeta", () => {
+    it("hands the retry setting to the request and returns the meta", async () => {
+      apiFactory.__get.mockResolvedValue({ data: { meta: "AAAA" } });
+      const retry = { retries: 2, initialDelay: 3000 };
+
+      const meta = await fetchTransactionMeta("abc", NETWORKS.PUBLIC, retry);
+
+      expect(meta).toBe("AAAA");
+      expect(apiFactory.__get).toHaveBeenCalledWith(
+        "/tx/abc",
+        expect.objectContaining({ retry }),
+      );
+    });
+
+    it("returns null quietly when the explorer has not indexed the transaction", async () => {
+      apiFactory.__get.mockRejectedValue({
+        status: 404,
+        isNetworkError: false,
+        message: "Request failed with status code 404",
+      });
+
+      expect(await fetchTransactionMeta("abc", NETWORKS.PUBLIC)).toBeNull();
+      expect(apiFactory.logApiError).not.toHaveBeenCalled();
+    });
+
+    it("still logs unexpected metadata failures", async () => {
+      const error = {
+        status: 500,
+        isNetworkError: false,
+        message: "Request failed with status code 500",
+      };
+      apiFactory.__get.mockRejectedValue(error);
+
+      expect(await fetchTransactionMeta("abc", NETWORKS.PUBLIC)).toBeNull();
+      expect(apiFactory.logApiError).toHaveBeenCalledWith(
+        "stellarExpert",
+        "Network unreachable while fetching transaction meta",
+        "Error fetching transaction meta",
+        error,
       );
     });
   });

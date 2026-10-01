@@ -17,7 +17,8 @@ import {
 import { NetworkDetails } from "config/constants";
 import useAppTranslation from "hooks/useAppTranslation";
 import { HistorySection, HistoryData } from "hooks/useGetHistoryData";
-import React, { useCallback, useRef, useState } from "react";
+import { useHistorySwapReceipt } from "hooks/useHistorySwapReceipt";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   RefreshControl,
   SectionList,
@@ -75,6 +76,18 @@ const HistoryList: React.FC<HistoryListProps> = ({
     useState<TransactionDetails | null>(null);
   const transactionDetailsBottomSheetModalRef = useRef<BottomSheetModal>(null);
   const sectionListRef = useRef<SectionList>(null);
+  const receipt = useHistorySwapReceipt(
+    transactionDetails,
+    networkDetails.network,
+    publicKey,
+  );
+  const closeDetails = useCallback(() => {
+    setTransactionDetails(null);
+    transactionDetailsBottomSheetModalRef.current?.dismiss();
+  }, []);
+  useEffect(() => {
+    closeDetails();
+  }, [publicKey, networkDetails.network, closeDetails]);
 
   // Custom refresh indicator for navigation refreshes
   const CustomRefreshIndicator = useCallback(() => {
@@ -201,16 +214,19 @@ const HistoryList: React.FC<HistoryListProps> = ({
     <BaseLayout insets={insets}>
       <BottomSheet
         modalRef={transactionDetailsBottomSheetModalRef}
-        handleCloseModal={() =>
-          transactionDetailsBottomSheetModalRef.current?.dismiss()
-        }
+        handleCloseModal={closeDetails}
+        bottomSheetModalProps={{ onDismiss: () => setTransactionDetails(null) }}
         scrollable
         useInsetsBottomPadding={false}
         maxDynamicContentSize={windowHeight * 0.9}
         customContent={
-          <TransactionDetailsBottomSheetCustomContent
-            transactionDetails={transactionDetails!}
-          />
+          receipt.details && (
+            <TransactionDetailsBottomSheetCustomContent
+              transactionDetails={receipt.details}
+              receiptStatus={receipt.status}
+              onRetryReceipt={receipt.retry}
+            />
+          )
         }
         scrollViewFooterComponent={renderFooterComponent}
       />
