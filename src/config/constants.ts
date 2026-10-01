@@ -105,7 +105,7 @@ export const HASH_KEY_EXPIRATION_MS = 72 * 60 * 60 * 1000; // 72 hours
 export const VISUAL_DELAY_MS = 500;
 
 const SECOND_IN_MS = 1000;
-const MINUTE_IN_MS = 60 * SECOND_IN_MS;
+export const MINUTE_IN_MS = 60 * SECOND_IN_MS;
 const HOUR_IN_MS = 60 * MINUTE_IN_MS;
 
 /**

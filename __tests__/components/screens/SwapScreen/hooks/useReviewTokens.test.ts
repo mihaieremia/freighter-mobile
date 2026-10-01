@@ -2,9 +2,15 @@
 import { renderHook } from "@testing-library/react-native";
 import BigNumber from "bignumber.js";
 import { useReviewTokens } from "components/screens/SwapScreen/hooks/useReviewTokens";
+import { NETWORKS } from "config/constants";
 import { TokenTypeWithCustomToken } from "config/types";
+import { useTokenCatalogStore } from "ducks/tokenCatalog";
 
 import { CONTRACT } from "../../../../../__mocks__/swapFixtures";
+import {
+  catalogSoroban,
+  seedCatalog,
+} from "../../../../../__mocks__/tokenCatalog";
 
 let mockStorePrices: Record<string, unknown> = {};
 
@@ -74,5 +80,61 @@ describe("useReviewTokens — a bought Soroban token the wallet does not hold", 
     const { result } = render(undefined);
 
     expect(result.current.destinationTokenFiatAmount).toBe("--");
+  });
+});
+
+describe("useReviewTokens — a token only the XOXNO catalog prices", () => {
+  beforeEach(() => {
+    mockStorePrices = {};
+    useTokenCatalogStore.setState({ byNetwork: {} });
+  });
+
+  it("values a 9-decimal destination at the catalog's price", () => {
+    seedCatalog(NETWORKS.PUBLIC, catalogSoroban);
+
+    const { result } = render(undefined, { destinationAmount: "0.123456789" });
+
+    expect(result.current.destinationTokenFiatAmount).toBe("$518.52");
+  });
+
+  it("prefers the prices store, then the picker's price, over the catalog", () => {
+    seedCatalog(NETWORKS.PUBLIC, catalogSoroban);
+    mockStorePrices = {
+      [`deJTRSY:${CONTRACT}`]: { currentPrice: new BigNumber(2) },
+    };
+
+    expect(render(1.02).result.current.destinationTokenFiatAmount).toBe(
+      "$10.00",
+    );
+
+    mockStorePrices = {};
+
+    expect(render(1.02).result.current.destinationTokenFiatAmount).toBe(
+      "$5.10",
+    );
+  });
+
+  it("values a held source the balances leave unpriced at the catalog's price", () => {
+    seedCatalog(NETWORKS.PUBLIC, catalogSoroban);
+    const sourceId = `deJTRSY:${CONTRACT}`;
+
+    const { result } = render(undefined, {
+      balanceItems: [
+        {
+          id: sourceId,
+          token: {
+            type: TokenTypeWithCustomToken.CUSTOM_TOKEN,
+            code: "deJTRSY",
+            issuer: { key: CONTRACT },
+          },
+        },
+      ],
+      sourceTokenId: sourceId,
+      sourceAmount: "2",
+      destinationAmount: "0",
+      destinationTokenDescriptor: null,
+    });
+
+    expect(result.current.sourceTokenFiatAmount).toBe("$8,400.00");
   });
 });

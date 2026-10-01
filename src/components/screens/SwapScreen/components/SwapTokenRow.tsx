@@ -1,6 +1,7 @@
 import BigNumber from "bignumber.js";
 import { TokenIconWithBadge } from "components/TokenIconWithBadge";
 import { TokenContextMenu } from "components/screens/SwapScreen/components/TokenContextMenu";
+import { recordTokenId } from "components/screens/SwapScreen/helpers";
 import { Text } from "components/sds/Typography";
 import { NETWORKS, POSITIVE_PRICE_CHANGE_THRESHOLD } from "config/constants";
 import {
@@ -15,7 +16,9 @@ import {
   formatFiatAmount,
   formatPercentageAmount,
 } from "helpers/formatAmount";
+import { getCatalogPrice } from "helpers/tokenCatalog";
 import useColors from "hooks/useColors";
+import { useTokenCatalogEntry } from "hooks/useTokenCatalogEntry";
 import React from "react";
 import { TouchableOpacity, View } from "react-native";
 
@@ -57,7 +60,7 @@ export interface SwapTokenRowProps {
  *
  * Three right-hand-slot variants:
  * - held: fiat value + 24h % (same layout as BalanceRow on the Home screen)
- * - non-held: ellipsis context menu (TokenContextMenu)
+ * - non-held: USD price (when known) + ellipsis context menu (TokenContextMenu)
  * - trending: price + 24h %; % chip hidden when 24h data is unavailable
  */
 const SwapTokenRowComponent: React.FC<SwapTokenRowProps> = ({
@@ -113,6 +116,15 @@ const SwapTokenRowComponent: React.FC<SwapTokenRowProps> = ({
         }
       : undefined;
 
+  // The USD price of a non-held row: the search/list price, else XOXNO's catalog.
+  const catalogEntry = useTokenCatalogEntry(
+    variant !== "held" && record ? recordTokenId(record) : undefined,
+  );
+  const catalogPrice = getCatalogPrice(catalogEntry);
+  const recordPrice = new BigNumber(record?.price ?? 0);
+  const nonHeldPrice =
+    recordPrice.isFinite() && recordPrice.gt(0) ? recordPrice : catalogPrice;
+
   const renderRightSlot = () => {
     if (variant === "held" && balance) {
       return (
@@ -146,11 +158,20 @@ const SwapTokenRowComponent: React.FC<SwapTokenRowProps> = ({
     }
 
     if (variant === "non-held" && tokenRef) {
-      return <TokenContextMenu token={tokenRef} network={network} />;
+      return (
+        <View className="flex-row items-center">
+          {nonHeldPrice ? (
+            <Text medium numberOfLines={1} testID="non-held-price">
+              {formatFiatAmount(nonHeldPrice)}
+            </Text>
+          ) : null}
+          <TokenContextMenu token={tokenRef} network={network} />
+        </View>
+      );
     }
 
     if (variant === "trending") {
-      const price = priceInfo?.currentPrice;
+      const price = priceInfo?.currentPrice ?? catalogPrice;
       const pct = priceInfo?.percentagePriceChange24h;
       return (
         <View className="flex-col items-end">
@@ -244,6 +265,7 @@ export const SwapTokenRow = React.memo(SwapTokenRowComponent, (prev, next) => {
     return (
       prev.record?.tokenCode === next.record?.tokenCode &&
       prev.record?.issuer === next.record?.issuer &&
+      prev.record?.price === next.record?.price &&
       // Re-render when the Blockaid scan resolves after first paint, otherwise
       // the in-place badge stays hidden on rows that mounted before scan.
       prev.record?.securityLevel === next.record?.securityLevel

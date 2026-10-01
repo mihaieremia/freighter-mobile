@@ -76,6 +76,7 @@ import useGetActiveAccount from "hooks/useGetActiveAccount";
 import { useInitialRecommendedFee } from "hooks/useInitialRecommendedFee";
 import { clearNetworkFeesCache, useNetworkFees } from "hooks/useNetworkFees";
 import { useTokenFiatConverter } from "hooks/useTokenFiatConverter";
+import { useWithCatalogPrices } from "hooks/useWithCatalogPrices";
 import { useToast } from "providers/ToastProvider";
 import React, {
   useEffect,
@@ -376,11 +377,14 @@ const SwapAmountScreen: React.FC<SwapAmountScreenProps> = ({
   const trendingId = selectedTrendingRecord
     ? recordTokenId(selectedTrendingRecord)
     : undefined;
-  const trendingPrices = withDescriptorPrice(
-    prices,
-    trendingId
-      ? { id: trendingId, priceUsd: selectedTrendingRecord?.price }
-      : undefined,
+  const trendingPrices = useWithCatalogPrices(
+    withDescriptorPrice(
+      prices,
+      trendingId
+        ? { id: trendingId, priceUsd: selectedTrendingRecord?.price }
+        : undefined,
+    ),
+    [trendingId],
   );
   const trendingPrice = trendingId ? trendingPrices[trendingId] : undefined;
 

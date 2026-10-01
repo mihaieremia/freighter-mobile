@@ -1,3 +1,4 @@
+/* eslint-disable @fnando/consistent-import/consistent-import */
 /* eslint-disable global-require, @typescript-eslint/no-var-requires, react/react-in-jsx-scope */
 import { render } from "@testing-library/react-native";
 import { BigNumber } from "bignumber.js";
@@ -11,10 +12,20 @@ import {
   NativeToken,
 } from "config/types";
 import { useTokenIconsStore } from "ducks/tokenIcons";
+import { useTokenCatalogEntry } from "hooks/useTokenCatalogEntry";
+
+import {
+  CATALOG_SOROBAN_CONTRACT,
+  catalogUsdc,
+} from "../../__mocks__/tokenCatalog";
 
 // Mock the token icons store
 jest.mock("ducks/tokenIcons", () => ({
   useTokenIconsStore: jest.fn(),
+}));
+
+jest.mock("hooks/useTokenCatalogEntry", () => ({
+  useTokenCatalogEntry: jest.fn(),
 }));
 
 // Mock the logos
@@ -67,11 +78,13 @@ describe("TokenIcon", () => {
     typeof useTokenIconsStore
   >;
 
+  const mockUseTokenCatalogEntry = useTokenCatalogEntry as jest.Mock;
   const mockValidateIconOnAccess = jest.fn();
   let mockState: any;
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockUseTokenCatalogEntry.mockReturnValue(undefined);
     mockState = {
       icons: {},
       validateIconOnAccess: mockValidateIconOnAccess,
@@ -189,5 +202,90 @@ describe("TokenIcon", () => {
     );
 
     expect(getByText("US")).toBeTruthy();
+  });
+  describe("catalog logo fallback", () => {
+    const sorobanToken = {
+      code: "XAUM",
+      issuer: { key: CATALOG_SOROBAN_CONTRACT },
+      type: TokenTypeWithCustomToken.CUSTOM_TOKEN,
+    };
+    const classicToken = {
+      code: "EURC",
+      issuer: {
+        key: "GBBD47UZQ2BNSE5O27ZIVVKV4OZVL2D7OEHTASAA5HQYKWNGZFYMHZWZ",
+      },
+      type: TokenTypeWithCustomToken.CREDIT_ALPHANUM4,
+    };
+
+    it("looks the catalog up by the token identifier", () => {
+      render(<TokenIcon token={sorobanToken} />);
+
+      expect(mockUseTokenCatalogEntry).toHaveBeenCalledWith(
+        `XAUM:${CATALOG_SOROBAN_CONTRACT}`,
+      );
+    });
+
+    it("shows the catalog logo when no other source has one", () => {
+      mockUseTokenCatalogEntry.mockReturnValue(catalogUsdc);
+
+      const { getByTestId } = render(<TokenIcon token={classicToken} />);
+
+      expect(getByTestId("image-url").props.children).toBe(catalogUsdc.iconUrl);
+    });
+
+    it("keeps the cached icon over the catalog logo", () => {
+      mockUseTokenCatalogEntry.mockReturnValue(catalogUsdc);
+      mockState.icons = {
+        [`EURC:${classicToken.issuer.key}`]: {
+          imageUrl: "https://example.com/eurc.png",
+          network: "PUBLIC",
+          isValidated: true,
+          isValid: true,
+        },
+      };
+
+      const { getByTestId } = render(<TokenIcon token={classicToken} />);
+
+      expect(getByTestId("image-url").props.children).toBe(
+        "https://example.com/eurc.png",
+      );
+    });
+
+    it("keeps an explicit iconUrl over the catalog logo", () => {
+      mockUseTokenCatalogEntry.mockReturnValue(catalogUsdc);
+
+      const { getByTestId } = render(
+        <TokenIcon token={classicToken} iconUrl="https://example.com/x.png" />,
+      );
+
+      expect(getByTestId("image-url").props.children).toBe(
+        "https://example.com/x.png",
+      );
+    });
+
+    it("uses the catalog logo when the cached icon failed validation", () => {
+      mockUseTokenCatalogEntry.mockReturnValue(catalogUsdc);
+      mockState.icons = {
+        [`EURC:${classicToken.issuer.key}`]: {
+          imageUrl: "https://example.com/dead.png",
+          network: "PUBLIC",
+          isValidated: true,
+          isValid: false,
+        },
+      };
+
+      const { getByTestId } = render(<TokenIcon token={classicToken} />);
+
+      expect(getByTestId("image-url").props.children).toBe(catalogUsdc.iconUrl);
+    });
+
+    it("shows initials when neither the sources nor the catalog have a logo", () => {
+      const { getByText, queryByTestId } = render(
+        <TokenIcon token={classicToken} />,
+      );
+
+      expect(queryByTestId("image-url")).toBeNull();
+      expect(getByText("EU")).toBeTruthy();
+    });
   });
 });

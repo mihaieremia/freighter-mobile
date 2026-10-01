@@ -1,5 +1,9 @@
 import Blockaid from "@blockaid/client";
-import { NETWORKS, STORAGE_KEYS } from "config/constants";
+import {
+  NETWORKS,
+  STORAGE_KEYS,
+  mapNetworkToNetworkDetails,
+} from "config/constants";
 import { logger } from "config/logger";
 import {
   BalanceMap,
@@ -9,13 +13,16 @@ import {
 } from "config/types";
 import { usePricesStore } from "ducks/prices";
 import { useRemoteConfigStore } from "ducks/remoteConfig";
+import { useTokenCatalogStore } from "ducks/tokenCatalog";
 import { isNativeAssetId, isNativeToken } from "helpers/assetIdentity";
 import {
   getLPShareCode,
   isLiquidityPool,
   sortBalances,
 } from "helpers/balances";
+import { getBalanceDecimalTotal } from "helpers/formatAmount";
 import { isMainnet } from "helpers/networks";
+import { fillMissingPricesFromCatalog } from "helpers/tokenCatalog";
 import { ApiError, logApiError } from "services/apiFactory";
 import { fetchBalances } from "services/backend";
 import { dataStorage } from "services/storage/storageFactory";
@@ -112,7 +119,9 @@ const getExistingPricedBalances = (
       // becomes state, making the wrong value stick.
       fiatTotal:
         existingPriceData?.currentPrice &&
-        balance.total.multipliedBy(existingPriceData.currentPrice),
+        getBalanceDecimalTotal(balance).multipliedBy(
+          existingPriceData.currentPrice,
+        ),
     };
 
     // Return entry as [id, pricedBalance] tuple
@@ -144,7 +153,9 @@ const getUpdatedPricedBalances = (
         fiatCode: "USD",
         fiatTotal:
           priceData.currentPrice &&
-          updatedPricedBalances[id].total.multipliedBy(priceData.currentPrice),
+          getBalanceDecimalTotal(updatedPricedBalances[id]).multipliedBy(
+            priceData.currentPrice,
+          ),
       };
     }
   });
@@ -152,6 +163,21 @@ const getUpdatedPricedBalances = (
   // Sort the updated priced balances
   return sortBalances(updatedPricedBalances);
 };
+
+const fillPricesFromCatalog = (
+  pricedBalances: PricedBalanceMap,
+  network: NETWORKS,
+): PricedBalanceMap =>
+  isMainnet(network)
+    ? fillMissingPricesFromCatalog(
+        pricedBalances,
+        useTokenCatalogStore.getState().byNetwork[network]?.byContractId,
+        mapNetworkToNetworkDetails(network).networkPassphrase,
+      )
+    : pricedBalances;
+
+// A late request must never update another account/network or a newer refresh.
+let balancesRequest = 0;
 
 /**
  * Fetches and processes priced balances with a timeout for price fetching
@@ -190,7 +216,13 @@ const fetchPricedBalances = async (
     ]);
   } catch (error) {
     // If price fetch times out, set existing data and continue fetching
-    set({ pricedBalances: existingPricedBalances, isLoading: false });
+    set({
+      pricedBalances: fillPricesFromCatalog(
+        existingPricedBalances,
+        params.network,
+      ),
+      isLoading: false,
+    });
   }
 
   // Make sure to wait until the prices finishes fetching
@@ -200,13 +232,14 @@ const fetchPricedBalances = async (
   const { pricesByNetwork, error: pricesError } = usePricesStore.getState();
   const prices = pricesByNetwork[params.network] ?? {};
 
-  if (pricesError || Object.keys(prices).length === 0) {
-    // Return existing data in case of price fetch error
-    return existingPricedBalances;
-  }
+  const pricedBalances =
+    pricesError || Object.keys(prices).length === 0
+      ? // Keep existing data in case of price fetch error
+        existingPricedBalances
+      : // Update pricedBalances with price data from the prices store
+        getUpdatedPricedBalances(existingPricedBalances, prices);
 
-  // Update pricedBalances with price data from the prices store
-  return getUpdatedPricedBalances(existingPricedBalances, prices);
+  return fillPricesFromCatalog(pricedBalances, params.network);
 };
 
 /**
@@ -309,6 +342,12 @@ export const useBalancesStore = create<BalancesState>((set, get) => ({
   fetchedPublicKey: null,
   fetchedNetwork: null,
   fetchAccountBalances: async (params) => {
+    if (!params.publicKey) return;
+    const request = ++balancesRequest;
+    const current = () => request === balancesRequest;
+    const setCurrent = (state: Partial<BalancesState>) => {
+      if (current()) set(state);
+    };
     try {
       // It can happen that the public key is not available yet during app initialization
       // In this case, we should early return and wait for the public key to be available
@@ -316,6 +355,25 @@ export const useBalancesStore = create<BalancesState>((set, get) => ({
       if (!params.publicKey) return;
 
       set({ isLoading: true, error: null });
+
+      useTokenCatalogStore
+        .getState()
+        .fetchCatalog(params.network)
+        .then(() => {
+          const state = get();
+          if (
+            current() &&
+            state.fetchedPublicKey === params.publicKey &&
+            state.fetchedNetwork === params.network
+          )
+            set({
+              pricedBalances: fillPricesFromCatalog(
+                state.pricedBalances,
+                params.network,
+              ),
+            });
+        })
+        .catch(() => {});
 
       const customTokensContractsIds = await retrieveCustomTokens({
         network: params.network,
@@ -338,6 +396,7 @@ export const useBalancesStore = create<BalancesState>((set, get) => ({
           useV2: useRemoteConfigStore.getState().use_balances_v2,
         });
 
+      if (!current()) return;
       if (!balances) {
         throw new Error("No balances returned from API");
       }
@@ -354,13 +413,20 @@ export const useBalancesStore = create<BalancesState>((set, get) => ({
 
       // Get existing state priced balances to preserve price data
       const statePricedBalances = get().pricedBalances;
+      set({
+        pricedBalances: fillPricesFromCatalog(
+          getExistingPricedBalances(balances, statePricedBalances),
+          params.network,
+        ),
+      });
       const pricedBalances = await fetchPricedBalances(
-        set,
+        setCurrent,
         balances,
         statePricedBalances,
         params,
       );
 
+      if (!current()) return;
       const scanResult = extractScanResultsFromBalances(
         pricedBalances,
         params.network,
@@ -380,6 +446,7 @@ export const useBalancesStore = create<BalancesState>((set, get) => ({
         error: null,
       });
     } catch (error) {
+      if (!current()) return;
       // Backend API errors come from the axios interceptor as plain ApiError
       // objects (not Error instances) with the server's reason in `data`.
       const apiError =

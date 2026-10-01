@@ -8,6 +8,7 @@ import {
   isClassicTokenType,
   isSorobanRecord,
 } from "components/screens/SwapScreen/helpers/recordPredicates";
+import { useSwapListedTokens } from "components/screens/SwapScreen/hooks/useSwapListedTokens";
 import {
   DEFAULT_DEBOUNCE_DELAY,
   NATIVE_TOKEN_CODE,
@@ -25,7 +26,9 @@ import { useVerifiedTokensStore } from "ducks/verifiedTokens";
 import { isNativeAssetId } from "helpers/assetIdentity";
 import { formatTokenIdentifier, getTokenType } from "helpers/balances";
 import { isMainnet } from "helpers/networks";
+import { isContractId } from "helpers/soroban";
 import { splitVerifiedTokens } from "helpers/splitVerifiedTokens";
+import { getSorobanContractId } from "helpers/swapAssets";
 import { type HeldBalanceItem } from "hooks/useBalancesList";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { searchToken } from "services/stellarExpert";
@@ -72,7 +75,7 @@ export interface SwapTokenLookupResult {
   isTrendingLoading: boolean;
   /** Current search term (synced with handleSearch input). Empty string = idle mode. */
   searchTerm: string;
-  /** Update the search term; triggers debounced active-search fetch. */
+  /** Update the search term; held-only matches are immediate, remote search is debounced. */
   handleSearch: (term: string) => void;
   /** Clear the search term and return to idle mode. */
   resetSearch: () => void;
@@ -150,6 +153,18 @@ export const useSwapTokenLookup = ({
   const balanceItemsRef = useRef(balanceItems);
   balanceItemsRef.current = balanceItems;
 
+  // XOXNO's swap list: its Soroban tokens are swappable when held, and every listed
+  // token the user does not hold is offered as a destination. Read through refs so
+  // the search callback keeps its identity while the list loads.
+  const { routableIds, listedRecords } = useSwapListedTokens({
+    network,
+    balanceItems,
+  });
+  const routableIdsRef = useRef(routableIds);
+  routableIdsRef.current = routableIds;
+  const listedRecordsRef = useRef(listedRecords);
+  listedRecordsRef.current = listedRecords;
+
   const [searchTerm, setSearchTerm] = useState<string>("");
   // trendingTokens = INTERSECTION of stellar.expert top-50 AND the runtime
   // verified-tokens list (held-INCLUSIVE). popularTokens below excludes held
@@ -214,8 +229,10 @@ export const useSwapTokenLookup = ({
         return tokens;
       }
       try {
+        // A Soroban token has a contract where a classic one has an issuer, and the
+        // bulk scan is asked about classic assets only.
         const addressList = tokens
-          .filter((t) => t.issuer)
+          .filter((t) => t.issuer && !isContractId(t.issuer))
           .map((t) => `${t.tokenCode}-${t.issuer}`);
         if (addressList.length === 0) return tokens;
         const bulkScanResult = await useBlockaidTokenScansStore
@@ -458,7 +475,11 @@ export const useSwapTokenLookup = ({
               : TokenTypeWithCustomToken.NATIVE,
           };
         })
-        .filter((t) => isClassicTokenType(t.tokenType));
+        .filter(
+          (t) =>
+            isClassicTokenType(t.tokenType) ||
+            routableIdsRef.current.has(t.issuer),
+        );
 
       // holdsOnly short-circuit: the "Swap from" picker only chooses among
       // tokens the user already holds, so there's no point hitting
@@ -559,7 +580,17 @@ export const useSwapTokenLookup = ({
       };
 
       heldMatches.forEach((t) => pushDeduped(heldDeduped, t));
+      // Tokens XOXNO lists for swapping are verified by that list; they join the
+      // search after the classic results.
+      const lowerTerm = term.toLowerCase();
+      const listedMatches = listedRecordsRef.current.filter(
+        (t) =>
+          matchesTerm(t.tokenCode, term) ||
+          matchesTerm(t.name, term) ||
+          t.issuer.toLowerCase() === lowerTerm,
+      );
       verified.forEach((t) => pushDeduped(verifiedDeduped, t));
+      listedMatches.forEach((t) => pushDeduped(verifiedDeduped, t));
       unverified.forEach((t) => pushDeduped(unverifiedDeduped, t));
 
       // Single Blockaid call against the concat keeps the network footprint
@@ -590,8 +621,7 @@ export const useSwapTokenLookup = ({
     [enhanceWithSecurityInfo, hasExistingTrustline, network, holdsOnly],
   );
 
-  // Debounce wiring: a user keystroke updates `searchTerm` immediately so the
-  // input stays responsive; the network call is debounced via a timer.
+  // Only network searches need debouncing; held-only matching is in-memory.
   // We use a plain setTimeout instead of the `useDebounce` helper because
   // the trailing-keystroke cancellation needs to share the same
   // AbortController lifecycle as the in-flight fetch.
@@ -604,12 +634,17 @@ export const useSwapTokenLookup = ({
       return undefined;
     }
 
+    if (holdsOnly) {
+      performSearch(searchTerm);
+      return undefined;
+    }
+
     const timer = setTimeout(() => {
       performSearch(searchTerm);
     }, DEFAULT_DEBOUNCE_DELAY);
 
     return () => clearTimeout(timer);
-  }, [searchTerm, performSearch]);
+  }, [searchTerm, performSearch, holdsOnly]);
 
   const handleSearch = useCallback((term: string) => {
     // Invalidate any in-flight search so a slow prior response can't
@@ -707,31 +742,47 @@ export const useSwapTokenLookup = ({
   ]);
 
   // Idle outputs
-  // Filter held balances down to classic-only (native + alphanum4/12).
-  // Liquidity pool shares and Soroban custom tokens are not swappable and
-  // should never surface in the Swap-To picker's "Your tokens" section.
+  // Filter held balances down to what can be swapped: classic (native +
+  // alphanum4/12) and the Soroban tokens the aggregator routes. Liquidity pool
+  // shares and other Soroban tokens are not swappable and should never surface in
+  // the Swap-To picker's "Your tokens" section.
   // getTokenType expects either NATIVE_TOKEN_CODE ("XLM") or a "CODE:ISSUER"
   // string. Balance.id can carry the raw "native" spelling for XLM, so
   // normalize first via the shared predicate — otherwise the catch-all
   // classifies it as LIQUIDITY_POOL_SHARES and filters it out.
   const yourTokens = useMemo(
     () =>
-      balanceItems.filter((b) =>
-        isClassicTokenType(
+      balanceItems.filter((b) => {
+        const contractId = getSorobanContractId(b);
+        if (contractId) return routableIds.has(contractId);
+
+        return isClassicTokenType(
           getTokenType(isNativeAssetId(b.id) ? NATIVE_TOKEN_CODE : b.id),
-        ),
-      ),
-    [balanceItems],
+        );
+      }),
+    [balanceItems, routableIds],
   );
   // popularTokens is the same verified intersection as trendingTokens,
   // additionally EXCLUDING held tokens for the picker.
-  const popularTokens = useMemo(
-    () =>
-      trendingTokens.filter(
-        (t) => !hasExistingTrustline(t.tokenCode, t.issuer),
+  const popularTokens = useMemo(() => {
+    const trending = trendingTokens.filter(
+      (t) => !hasExistingTrustline(t.tokenCode, t.issuer),
+    );
+    if (holdsOnly) return trending;
+    // The rest of XOXNO's swap list follows, without repeating a token the
+    // trending list already shows. Destination only: the source picker lists held
+    // tokens.
+    const shown = new Set(
+      trending.map((t) => canonicalId(t.tokenCode, t.issuer)),
+    );
+
+    return [
+      ...trending,
+      ...listedRecords.filter(
+        (t) => !shown.has(canonicalId(t.tokenCode, t.issuer)),
       ),
-    [trendingTokens, hasExistingTrustline],
-  );
+    ];
+  }, [trendingTokens, hasExistingTrustline, holdsOnly, listedRecords]);
 
   return {
     yourTokens,

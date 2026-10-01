@@ -18,7 +18,7 @@ import { usePricesForNetwork } from "ducks/prices";
 import { useSwapStore } from "ducks/swap";
 import { useSwapSettingsStore } from "ducks/swapSettings";
 import { useTransactionBuilderStore } from "ducks/transactionBuilder";
-import { calculateSwapRate } from "helpers/balances";
+import { calculateSwapRate, getTokenIdentifier } from "helpers/balances";
 import { formatTransactionDate } from "helpers/date";
 import {
   formatTokenForDisplay,
@@ -33,6 +33,7 @@ import { useClipboard } from "hooks/useClipboard";
 import useColors from "hooks/useColors";
 import useGetActiveAccount from "hooks/useGetActiveAccount";
 import { useInAppBrowser } from "hooks/useInAppBrowser";
+import { useWithCatalogPrices } from "hooks/useWithCatalogPrices";
 import React, { useMemo } from "react";
 import { View } from "react-native";
 import { TransactionDetail } from "services/stellar";
@@ -153,7 +154,11 @@ const SwapTransactionDetailsBottomSheet: React.FC<
   // Thread the live prices map so non-held destinations resolve their
   // fiat via the token-id lookup (strategy 3) — without it, the
   // destination row renders "--" after every swap to a new token.
-  const prices = usePricesForNetwork(network);
+  // A token the store does not price falls back to the XOXNO catalog's price.
+  const prices = useWithCatalogPrices(usePricesForNetwork(network), [
+    getTokenIdentifier(sourceToken),
+    getTokenIdentifier(destinationToken),
+  ]);
 
   const sourceTokenFiatAmountValue = calculateTokenFiatAmount({
     token: sourceToken,

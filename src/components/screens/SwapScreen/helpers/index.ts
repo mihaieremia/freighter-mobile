@@ -23,4 +23,5 @@ export {
   isQuoteExpiredResultCodes,
 } from "./quoteErrors";
 export { isAggregatorQuoteSource, isStaleAggregatorQuote } from "ducks/swap";
+export { addBoughtTokenToBalances } from "./swapInventory";
 export { reportSettledSwap } from "./swapSettlement";

@@ -15,6 +15,7 @@ import { useAuthenticationStore } from "ducks/auth";
 import { usePricesForNetwork } from "ducks/prices";
 import { SwapPathResult } from "ducks/swap";
 import { formatFiatAmount } from "helpers/formatAmount";
+import { useWithCatalogPrices } from "hooks/useWithCatalogPrices";
 import { useMemo } from "react";
 
 /**
@@ -107,7 +108,10 @@ export const useReviewTokens = ({
     () => withDescriptorPrice(storePrices, destinationTokenDescriptor),
     [storePrices, destinationTokenDescriptor],
   );
-  const prices = pickerPrices;
+  const prices = useWithCatalogPrices(pickerPrices, [
+    sourceTokenId,
+    destinationTokenDescriptor?.id,
+  ]);
 
   const sourceTokenFiatAmountValue = calculateTokenFiatAmount({
     token: sourceToken,

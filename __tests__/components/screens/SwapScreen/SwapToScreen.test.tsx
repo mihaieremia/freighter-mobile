@@ -149,6 +149,28 @@ describe("SwapToScreen", () => {
     expect(getByText("Popular tokens")).toBeTruthy();
   });
 
+  it("shows the USD price on a Popular-section row when it is known, and none when it is not", () => {
+    (useSwapTokenLookupModule.useSwapTokenLookup as jest.Mock).mockReturnValue({
+      ...defaultLookupResult,
+      popularTokens: [
+        { ...mockPopularRecord, price: 2.5 },
+        {
+          ...mockPopularRecord,
+          tokenCode: "YBX",
+          issuer: "GBBD47UZQ2BNSE5O27ZIVVKV4OZVL2D7OEHTASAA5HQYKWNGZFYMHZWZ",
+        },
+      ],
+    });
+
+    const { getAllByTestId, getByText } = renderWithProviders(
+      <SwapToScreen {...mockNavProps} />,
+    );
+
+    expect(getByText("YBX")).toBeTruthy();
+    expect(getAllByTestId("non-held-price")).toHaveLength(1);
+    expect(getAllByTestId("non-held-price")[0]).toHaveTextContent("$2.50");
+  });
+
   it("uses the plural 'Your tokens' title when the held bucket has 2+ entries", () => {
     const extraHeldBalance = {
       ...mockHeldBalance,

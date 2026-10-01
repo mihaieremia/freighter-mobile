@@ -1244,7 +1244,89 @@ export const fetchSwapQuote = async ({
 };
 
 /** The kind of a listed token. The values are the backend's wire values. */
+export enum SwapListedTokenKind {
+  NATIVE = "native",
+  CLASSIC = "classic",
+  SOROBAN = "soroban",
+}
 
+/**
+ * A token XOXNO lists for swapping that the aggregator routes. A classic asset is
+ * named by its Stellar Asset Contract and swapped as a classic asset (`asset` is its
+ * "CODE:ISSUER", and it needs a trustline); a Soroban token needs neither.
+ */
+export interface SwapListedToken {
+  /** The token's contract id. */
+  id: string;
+  kind: SwapListedTokenKind;
+  /** "CODE:ISSUER" of a classic asset. */
+  asset?: string;
+  code: string;
+  name: string;
+  decimals: number;
+  iconUrl?: string;
+  priceUsd: number;
+}
+
+/** Lists the tokens XOXNO offers for swapping, with the names, icons and prices to show. */
+export const fetchSwapTokens = async (
+  network: NETWORKS,
+): Promise<SwapListedToken[]> => {
+  const { data } = await freighterBackendV2.get<{ data: SwapListedToken[] }>(
+    "/swap/tokens",
+    { params: { network } },
+  );
+
+  return data.data;
+};
+
+/**
+ * A token in XOXNO's catalog: every token it has registered, routable or not.
+ * Display data only (logo and USD price); it says nothing about safety.
+ */
+export interface TokenCatalogEntry {
+  /** The token's contract id (a classic asset's Stellar Asset Contract). */
+  id: string;
+  code: string;
+  name: string;
+  decimals: number;
+  /** Logo URL. May be empty; the logo is then at the deterministic media URL. */
+  iconUrl?: string;
+  /** USD price. 0 or missing when unknown. */
+  priceUsd?: number;
+  /** Whether the aggregator routes the token. */
+  swappable: boolean;
+}
+
+/** Lists every token in XOXNO's catalog, with the logo and USD price to show. */
+export const fetchTokenCatalog = async (
+  network: NETWORKS,
+): Promise<TokenCatalogEntry[]> => {
+  const { data } = await freighterBackendV2.get<{ data: TokenCatalogEntry[] }>(
+    "/swap/tokens",
+    { params: { network, scope: "all" } },
+  );
+
+  return data.data;
+};
+
+/**
+ * Response from the protocols API
+ * @interface ProtocolsResponse
+ * @property {Object} data - Response data container
+ * @property {Object[]} data.protocols - Array of protocol objects
+ * @property {string} data.protocols[].description - Protocol description. Rendered via
+ * LinkedText (components/LinkedText): supports markdown-style `[text](https://...)` links
+ * and bare `https://` URLs, which render as tappable links. No other markdown/HTML is parsed.
+ * @property {string} data.protocols[].icon_url - Protocol icon URL
+ * @property {string} data.protocols[].name - Protocol name
+ * @property {string} data.protocols[].website_url - Protocol website URL
+ * @property {string[]} data.protocols[].tags - Protocol tags/categories
+ * @property {string} [data.protocols[].background_url] - Protocol background image URL for cards/carousels
+ * @property {boolean} [data.protocols[].is_blacklisted] - Whether protocol is blacklisted
+ * @property {boolean} [data.protocols[].is_wc_not_supported] - Whether protocol supports WalletConnect
+ * @property {boolean} [data.protocols[].is_trending] - Whether protocol is featured in the trending carousel
+ */
 interface ProtocolsResponse {
   data: {
     protocols: {
