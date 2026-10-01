@@ -24,4 +24,7 @@ export {
 } from "./quoteErrors";
 export { isAggregatorQuoteSource, isStaleAggregatorQuote } from "ducks/swap";
 export { addBoughtTokenToBalances } from "./swapInventory";
-export { reportSettledSwap } from "./swapSettlement";
+export {
+  isAggregatorSlippageRejection,
+  reportSettledSwap,
+} from "./swapSettlement";

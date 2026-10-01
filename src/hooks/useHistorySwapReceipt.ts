@@ -1,0 +1,163 @@
+import BigNumber from "bignumber.js";
+import { TransactionDetails } from "components/screens/HistoryScreen/types";
+import { NETWORKS } from "config/constants";
+import { useCallback, useEffect, useState } from "react";
+import { fetchSwapReceipt, getTokenDetails } from "services/backend";
+
+export type HistoryReceiptStatus = "loading" | "confirmed" | "unavailable";
+export const useHistorySwapReceipt = (
+  details: TransactionDetails | null,
+  network: NETWORKS,
+  viewer: string,
+) => {
+  const [retryCount, setRetryCount] = useState(0);
+  const [resolved, setResolved] = useState<{
+    original: TransactionDetails;
+    details: TransactionDetails;
+    status: HistoryReceiptStatus;
+  } | null>(null);
+  const retry = useCallback(() => setRetryCount((count) => count + 1), []);
+
+  useEffect(() => {
+    const receipt = details?.swapReceipt;
+    if (
+      !details ||
+      !receipt ||
+      receipt.network !== network ||
+      receipt.viewer !== viewer
+    )
+      return undefined;
+    const controller = new AbortController();
+    let current = true;
+    setResolved({ original: details, details, status: "loading" });
+    const load = async () => {
+      try {
+        const metadata = Promise.all([
+          receipt.sourceDecimals === undefined
+            ? getTokenDetails({
+                contractId: receipt.tokenIn,
+                publicKey: viewer,
+                network,
+                signal: controller.signal,
+              })
+            : Promise.resolve(null),
+          receipt.destinationDecimals === undefined
+            ? getTokenDetails({
+                contractId: receipt.tokenOut,
+                publicKey: viewer,
+                network,
+                signal: controller.signal,
+              })
+            : Promise.resolve(null),
+        ]).catch(() => [null, null] as const);
+        const result = await fetchSwapReceipt(
+          receipt,
+          receipt.tokenOut,
+          controller.signal,
+        );
+        if (!current || controller.signal.aborted) return;
+        const enrich = (
+          sourceMeta: Awaited<ReturnType<typeof getTokenDetails>>,
+          destinationMeta: Awaited<ReturnType<typeof getTokenDetails>>,
+        ) => {
+          const validDecimals = (decimals?: number) =>
+            decimals !== undefined &&
+            Number.isInteger(decimals) &&
+            decimals >= 0 &&
+            decimals <= 255
+              ? decimals
+              : undefined;
+          const sourceDecimals = validDecimals(
+            receipt.sourceDecimals ?? sourceMeta?.decimals,
+          );
+          const destinationDecimals = validDecimals(
+            receipt.destinationDecimals ?? destinationMeta?.decimals,
+          );
+          const destinationAmount =
+            result.status === "confirmed" && result.receivedAtoms
+              ? new BigNumber(result.receivedAtoms)
+                  .shiftedBy(-(destinationDecimals ?? 0))
+                  .toFixed()
+              : "";
+          const enriched: TransactionDetails = {
+            ...details,
+            swapReceipt: { ...receipt, sourceDecimals, destinationDecimals },
+            assetDiffs: [
+              {
+                assetCode:
+                  sourceMeta?.symbol ||
+                  details.swapDetails?.sourceTokenCode ||
+                  receipt.tokenIn,
+                assetIssuer: details.swapDetails?.sourceTokenIssuer || null,
+                decimals: sourceDecimals ?? 0,
+                amount: new BigNumber(receipt.sourceAtoms)
+                  .shiftedBy(-(sourceDecimals ?? 0))
+                  .toFixed(),
+                isCredit: false,
+              },
+              ...(destinationAmount
+                ? [
+                    {
+                      assetCode:
+                        destinationMeta?.symbol ||
+                        details.swapDetails?.destinationTokenCode ||
+                        receipt.tokenOut,
+                      assetIssuer:
+                        details.swapDetails?.destinationTokenIssuer || null,
+                      decimals: destinationDecimals ?? 0,
+                      amount: destinationAmount,
+                      isCredit: true,
+                    },
+                  ]
+                : []),
+            ],
+            swapDetails: details.swapDetails && {
+              ...details.swapDetails,
+              sourceTokenCode:
+                sourceMeta?.symbol || details.swapDetails.sourceTokenCode,
+              destinationTokenCode:
+                destinationMeta?.symbol ||
+                details.swapDetails.destinationTokenCode,
+              sourceAmount: new BigNumber(receipt.sourceAtoms)
+                .shiftedBy(-(sourceDecimals ?? 0))
+                .toFixed(),
+              destinationAmount,
+            },
+          };
+          setResolved({
+            original: details,
+            details: enriched,
+            status: result.status,
+          });
+        };
+        enrich(null, null);
+        const [sourceMeta, destinationMeta] = await metadata;
+        if (current && !controller.signal.aborted)
+          enrich(sourceMeta, destinationMeta);
+      } catch {
+        if (current && !controller.signal.aborted)
+          setResolved({ original: details, details, status: "unavailable" });
+      }
+    };
+    load();
+    return () => {
+      current = false;
+      controller.abort();
+    };
+  }, [details, network, viewer, retryCount]);
+
+  const applicable = details?.swapReceipt
+    ? details.swapReceipt.network === network &&
+      details.swapReceipt.viewer === viewer
+    : true;
+  const activeDetails =
+    resolved?.original === details ? resolved.details : details;
+  return {
+    details: applicable ? activeDetails : null,
+    status:
+      resolved?.original === details
+        ? resolved.status
+        : ("loading" as HistoryReceiptStatus),
+    retry,
+  };
+};

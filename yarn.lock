@@ -6131,6 +6131,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@xoxno/stellar-swap@https://github.com/XOXNO/sdk-js/releases/download/stellar-swap-v0.1.0/xoxno-stellar-swap-0.1.0.tgz":
+  version: 0.1.0
+  resolution: "@xoxno/stellar-swap@https://github.com/XOXNO/sdk-js/releases/download/stellar-swap-v0.1.0/xoxno-stellar-swap-0.1.0.tgz"
+  peerDependencies:
+    "@stellar/stellar-sdk": ^16.3.0 || ^17.0.1
+  checksum: 10c0/0eb446ef6ae0e9b0853618f5a1d3dda1c3cd41d9dccea29abaeb94f3a24a1ba63abcbce8efe4c27af030200d70e025e09a9a400ee124fffc976b3e468b28d0f3
+  languageName: node
+  linkType: hard
+
 "@yarnpkg/lockfile@npm:^1.0.0, @yarnpkg/lockfile@npm:^1.1.0":
   version: 1.1.0
   resolution: "@yarnpkg/lockfile@npm:1.1.0"
@@ -9930,6 +9939,7 @@ __metadata:
     "@walletconnect/react-native-compat": "npm:2.23.1"
     "@walletconnect/types": "npm:2.23.1"
     "@walletconnect/utils": "npm:2.23.1"
+    "@xoxno/stellar-swap": "https://github.com/XOXNO/sdk-js/releases/download/stellar-swap-v0.1.0/xoxno-stellar-swap-0.1.0.tgz"
     asyncstorage-down: "npm:4.2.0"
     axios: "npm:1.13.2"
     babel-plugin-module-resolver: "npm:5.0.2"

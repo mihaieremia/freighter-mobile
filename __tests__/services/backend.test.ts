@@ -6,6 +6,7 @@ import {
   fetchBalances,
   fetchCollectibles,
   fetchSwapQuote,
+  fetchSwapReceipt,
   fetchSwapTokens,
   fetchTokenPrices,
   freighterBackendV1,
@@ -1502,6 +1503,82 @@ describe("Backend Service - swap routes", () => {
       expect(freighterBackendV2.get).toHaveBeenCalledWith("/swap/tokens", {
         params: { network: NETWORKS.PUBLIC },
       });
+    });
+  });
+});
+
+describe("fetchSwapReceipt", () => {
+  const identity = {
+    network: NETWORKS.PUBLIC,
+    transactionHash: "a".repeat(64),
+    viewer: "viewer",
+    operationIndex: 2,
+  };
+  const receipt = {
+    ...identity,
+    status: "confirmed",
+    tokenOut: "output",
+    receivedAtoms: "123456789012345678901234567",
+  };
+  let receiptTestId = 0;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    identity.transactionHash = String(++receiptTestId).padStart(64, "0");
+    receipt.transactionHash = identity.transactionHash;
+  });
+  it("requests the selected operation and checks the full receipt identity", async () => {
+    (freighterBackendV2.get as jest.Mock).mockResolvedValue({
+      data: { data: receipt },
+    });
+    const controller = new AbortController();
+    expect(
+      await fetchSwapReceipt(identity, "output", controller.signal),
+    ).toEqual(receipt);
+    expect(await fetchSwapReceipt(identity, "output")).toEqual(receipt);
+    expect(freighterBackendV2.get).toHaveBeenCalledTimes(1);
+    expect(freighterBackendV2.get).toHaveBeenCalledWith(
+      `/swap/receipt/${identity.transactionHash}`,
+      {
+        params: {
+          network: NETWORKS.PUBLIC,
+          viewer: "viewer",
+          operationIndex: 2,
+        },
+        signal: controller.signal,
+      },
+    );
+  });
+  it.each([
+    { network: NETWORKS.TESTNET },
+    { transactionHash: "b".repeat(64) },
+    { viewer: "other" },
+    { operationIndex: 0 },
+    { tokenOut: "other" },
+    { status: "pending" },
+    ...[
+      "0",
+      "-1",
+      "01",
+      "1.2",
+      "1e5",
+      "170141183460469231731687303715884105728",
+    ].map((receivedAtoms) => ({ receivedAtoms })),
+  ])(
+    "rejects mismatched or invalid confirmed receipts %o",
+    async (override) => {
+      (freighterBackendV2.get as jest.Mock).mockResolvedValue({
+        data: { data: { ...receipt, ...override } },
+      });
+      await expect(fetchSwapReceipt(identity, "output")).rejects.toThrow();
+    },
+  );
+  it("accepts unavailable without inventing an amount", async () => {
+    (freighterBackendV2.get as jest.Mock).mockResolvedValue({
+      data: { data: { ...identity, status: "unavailable" } },
+    });
+    expect(await fetchSwapReceipt(identity, "output")).toEqual({
+      ...identity,
+      status: "unavailable",
     });
   });
 });

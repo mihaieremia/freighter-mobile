@@ -19,7 +19,7 @@ import {
   roundHalfUp2dp,
 } from "helpers/usdVolume";
 
-import { CONTRACT as XAUM_CONTRACT } from "../../__mocks__/swapFixtures";
+import { XAUM_CONTRACT } from "../../__mocks__/routerSwapHistory";
 
 const { networkPassphrase } = TESTNET_NETWORK_DETAILS;
 

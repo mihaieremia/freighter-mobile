@@ -1,6 +1,19 @@
-import { FeeBumpTransaction, Transaction, xdr } from "@stellar/stellar-sdk";
+import {
+  FeeBumpTransaction,
+  StrKey,
+  Transaction,
+  scValToNative,
+  xdr,
+} from "@stellar/stellar-sdk";
 import BigNumber from "bignumber.js";
+import { logger } from "config/logger";
 import { stroopToXlm } from "helpers/formatAmount";
+
+const ERROR_EVENT_SYMBOL = "error";
+/** Topics of a host `error` diagnostic event: the symbol, then the error. */
+const ERROR_EVENT_MIN_TOPICS = 2;
+/** `SlippageExceeded` in the XOXNO router (`contracts/swap-aggregator/src/errors.rs`). */
+const ROUTER_SLIPPAGE_ERROR_CODE = 5;
 
 /**
  * Locates a `pathPaymentStrictSend` operation's position within a built
@@ -16,6 +29,33 @@ export const findPathPaymentStrictSendIndex = (
       ? transaction.innerTransaction.operations
       : transaction.operations;
   return operations.findIndex((op) => op.type === "pathPaymentStrictSend");
+};
+
+/**
+ * The result of the transaction that carries the operations. A fee-bump
+ * transaction's per-operation results live one level down, in the inner
+ * transaction's own result.
+ */
+const unwrapTransactionResult = (resultXdr: string) => {
+  const { result } = xdr.TransactionResult.fromXdr(resultXdr, "base64");
+
+  return result.type === "txFeeBumpInnerSuccess" ||
+    result.type === "txFeeBumpInnerFailed"
+    ? result.innerResultPair.result.result
+    : result;
+};
+
+/**
+ * Whether a transaction's Horizon result XDR reports the transaction as a
+ * success (its operations applied). Returns `false` for a failed transaction
+ * and for a result that cannot be parsed; never throws.
+ */
+export const isTransactionResultSuccess = (resultXdr: string): boolean => {
+  try {
+    return unwrapTransactionResult(resultXdr).type === "txSuccess";
+  } catch {
+    return false;
+  }
 };
 
 /**
@@ -38,16 +78,7 @@ export const getSettledPathPaymentStrictSendAmount = (
     return null;
   }
   try {
-    const txResult = xdr.TransactionResult.fromXdr(resultXdr, "base64");
-    const innerResult = txResult.result;
-
-    // A fee-bump transaction's per-operation results live one level down, in
-    // the inner transaction's own result.
-    const innerTxResult =
-      innerResult.type === "txFeeBumpInnerSuccess" ||
-      innerResult.type === "txFeeBumpInnerFailed"
-        ? innerResult.innerResultPair.result.result
-        : innerResult;
+    const innerTxResult = unwrapTransactionResult(resultXdr);
 
     // txSuccess only. A `txFailed` result still carries per-operation
     // results, and an operation that succeeded before a later one failed
@@ -79,5 +110,73 @@ export const getSettledPathPaymentStrictSendAmount = (
     return stroopToXlm(new BigNumber(stroops.toString()));
   } catch {
     return null;
+  }
+};
+
+/** Whether `contractId` emitted the event, and its first topic is the given symbol. */
+const isEventOf = (
+  event: xdr.ContractEvent,
+  contractId: string,
+  symbol: string,
+): boolean => {
+  const [topic] = event.body.v0.topics;
+
+  return (
+    !!event.contractId &&
+    StrKey.encodeContract(event.contractId.toBytes()) === contractId &&
+    topic?.type === "scvSymbol" &&
+    scValToNative(topic) === symbol
+  );
+};
+
+/**
+ * Whether a diagnostic event is the host's `error` event for a contract error
+ * that `contractId` raised with the router's slippage code. The emitter must
+ * be the router itself: a token or pool it calls can trap with the same code,
+ * and that says nothing about the router's own minimum-output check.
+ */
+const isRouterSlippageEvent = (
+  event: xdr.ContractEvent,
+  routerContractId: string,
+): boolean => {
+  const { topics } = event.body.v0;
+  if (
+    !isEventOf(event, routerContractId, ERROR_EVENT_SYMBOL) ||
+    topics.length < ERROR_EVENT_MIN_TOPICS ||
+    topics[1].type !== "scvError"
+  ) {
+    return false;
+  }
+
+  const { error } = topics[1];
+
+  return (
+    error.type === "sceContract" &&
+    error.contractCode === ROUTER_SLIPPAGE_ERROR_CODE
+  );
+};
+
+/** Only v4 router-emitted SlippageExceeded diagnostics classify failure; malformed metadata returns false. */
+export const isRouterSlippageFailure = (
+  metaXdr: string,
+  routerContractId: string,
+): boolean => {
+  try {
+    const meta = xdr.TransactionMeta.fromXDR(metaXdr, "base64");
+
+    return (
+      meta.type === "v4" &&
+      meta.v4.diagnosticEvents.some(({ event }) =>
+        isRouterSlippageEvent(event, routerContractId),
+      )
+    );
+  } catch (error) {
+    logger.error(
+      "transactionResult",
+      "Failed to read the failed transaction's events",
+      error,
+    );
+
+    return false;
   }
 };

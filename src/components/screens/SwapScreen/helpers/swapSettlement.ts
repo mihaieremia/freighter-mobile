@@ -1,13 +1,18 @@
 import { TransactionBuilder } from "@stellar/stellar-sdk";
+import { decodeSwapEnvelope, getSwapRouter } from "@xoxno/stellar-swap";
 import BigNumber from "bignumber.js";
 import { NETWORKS, mapNetworkToNetworkDetails } from "config/constants";
 import { logger } from "config/logger";
 import { PricedBalance } from "config/types";
 import { SubmitTransactionOutcome } from "ducks/transactionBuilder";
 import { ConfirmationPriceSnapshot } from "helpers/confirmationPriceSnapshot";
+import { getBalanceDecimals } from "helpers/formatAmount";
+import { swapContractId } from "helpers/swapAssets";
 import {
   findPathPaymentStrictSendIndex,
   getSettledPathPaymentStrictSendAmount,
+  isRouterSlippageFailure,
+  isTransactionResultSuccess,
 } from "helpers/transactionResult";
 import {
   AssetIdentity,
@@ -17,19 +22,37 @@ import {
   deriveLegUsd,
 } from "helpers/usdVolume";
 import { analytics } from "services/analytics";
+import { fetchSwapReceipt } from "services/backend";
+import { fetchTransactionMeta } from "services/stellarExpert";
+
+/**
+ * A rejected router swap's meta is asked for twice, two seconds apart, and the
+ * whole lookup gives up after the budget, so the failure UI waits at most that
+ * long for the verdict (a lookup that is still running then is left to end).
+ */
+const SLIPPAGE_META_RETRY = { retries: 1, initialDelay: 2000 };
+const SLIPPAGE_LOOKUP_BUDGET_MS = 6000;
+
+/** Horizon's HTTP status for a transaction it evaluated and rejected. */
+const HTTP_STATUS_REJECTED = 400;
+const TX_FAILED_CODE = "tx_failed";
+/** Horizon's operation result code for a Soroban call that trapped. */
+const FUNCTION_TRAPPED_CODE = "function_trapped";
 
 /** Actual confirmed output; enrichment failures never fail a successful swap. */
-const readSettledDestinationAmount = ({
+const readSettledDestinationAmount = async ({
   outcome,
   signedXDR,
   network,
+  destination,
+  publicKey,
 }: {
   outcome: SubmitTransactionOutcome;
   signedXDR: string;
   network: NETWORKS;
   destination: PricedBalance;
   publicKey: string;
-}): BigNumber | null => {
+}): Promise<BigNumber | null> => {
   try {
     const { networkPassphrase } = mapNetworkToNetworkDetails(network);
     const submittedTx = TransactionBuilder.fromXdr(
@@ -44,7 +67,31 @@ const readSettledDestinationAmount = ({
         : null;
     }
 
-    return null;
+    if (!outcome.resultXdr || !isTransactionResultSuccess(outcome.resultXdr)) {
+      return null;
+    }
+
+    if (!outcome.hash) return null;
+    const call = decodeSwapEnvelope({
+      envelopeXdr: signedXDR,
+      networkPassphrase,
+      viewer: publicKey,
+    });
+    if (!call) return null;
+    const receipt = await fetchSwapReceipt(
+      {
+        network,
+        transactionHash: outcome.hash,
+        viewer: publicKey,
+        operationIndex: call.operationIndex,
+      },
+      swapContractId(destination, networkPassphrase),
+    );
+    return receipt.status === "confirmed" && receipt.receivedAtoms
+      ? new BigNumber(receipt.receivedAtoms).shiftedBy(
+          -getBalanceDecimals(destination),
+        )
+      : null;
   } catch (error) {
     logger.error(
       "SwapSettlement",
@@ -53,6 +100,78 @@ const readSettledDestinationAmount = ({
     );
 
     return null;
+  }
+};
+
+/**
+ * Whether a rejected submit is a Soroban call that trapped: Horizon evaluated
+ * the transaction (`400`, `tx_failed`) and an operation reports
+ * `function_trapped`. Anything else (a bad sequence, an expired transaction, a
+ * 5xx whose outcome is undetermined, a transport error) says nothing about the
+ * router, so it is never worth a lookup.
+ */
+const isTrappedSorobanRejection = (
+  outcome: SubmitTransactionOutcome,
+): boolean =>
+  outcome.isProtocolAnswer &&
+  outcome.httpStatus === HTTP_STATUS_REJECTED &&
+  outcome.resultCodes?.transaction === TX_FAILED_CODE &&
+  !!outcome.resultCodes.operations?.includes(FUNCTION_TRAPPED_CODE);
+
+/**
+ * Asks for the failed transaction's meta within the slippage budget. A lookup
+ * still running at the deadline has its result dropped.
+ */
+const fetchFailedMeta = (
+  hash: string,
+  network: NETWORKS,
+): Promise<string | null> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), SLIPPAGE_LOOKUP_BUDGET_MS);
+  });
+
+  return Promise.race([
+    fetchTransactionMeta(hash, network, SLIPPAGE_META_RETRY),
+    deadline,
+  ]).finally(() => clearTimeout(timer));
+};
+
+/** Only a 400 tx_failed/function_trapped triggers bounded router-specific diagnostic lookup. */
+export const isAggregatorSlippageRejection = async ({
+  outcome,
+  signedXDR,
+  network,
+}: {
+  outcome: SubmitTransactionOutcome;
+  signedXDR: string;
+  network: NETWORKS;
+}): Promise<boolean> => {
+  const routerContractId = getSwapRouter(
+    mapNetworkToNetworkDetails(network).networkPassphrase,
+    "xoxno",
+  );
+  if (!routerContractId || !isTrappedSorobanRejection(outcome)) {
+    return false;
+  }
+
+  try {
+    const { networkPassphrase } = mapNetworkToNetworkDetails(network);
+    // `hash()` is a Uint8Array, whose own `toString` is not hex.
+    const hash = Buffer.from(
+      TransactionBuilder.fromXdr(signedXDR, networkPassphrase).hash(),
+    ).toString("hex");
+    const metaXdr = await fetchFailedMeta(hash, network);
+
+    return metaXdr ? isRouterSlippageFailure(metaXdr, routerContractId) : false;
+  } catch (error) {
+    logger.error(
+      "SwapSettlement",
+      "Failed to tell whether the router rejected the swap for slippage",
+      error,
+    );
+
+    return false;
   }
 };
 
@@ -88,7 +207,9 @@ interface SettledSwapReport {
  * When Stellar Expert cannot supply the meta the event still fires, with
  * `to_amount_usd_status: "error"` and no `to_amount`.
  */
-export const reportSettledSwap = (report: SettledSwapReport): void => {
+export const reportSettledSwap = async (
+  report: SettledSwapReport,
+): Promise<void> => {
   try {
     const {
       snapshot,
@@ -97,7 +218,7 @@ export const reportSettledSwap = (report: SettledSwapReport): void => {
       destCanonicalId,
       quotedDestinationAmount,
     } = report;
-    const settledDestAmount = readSettledDestinationAmount(report);
+    const settledDestAmount = await readSettledDestinationAmount(report);
 
     const sourceLeg = deriveLegUsd(
       sourceAmount,

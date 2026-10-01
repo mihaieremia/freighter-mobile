@@ -5,6 +5,7 @@ import {
   addBoughtTokenToBalances,
   getQuoteExpiredOperationCodes,
   getTokenFromBalance,
+  isAggregatorSlippageRejection,
   isStaleAggregatorQuote,
   isAggregatorQuoteSource,
   reportSettledSwap,
@@ -42,6 +43,7 @@ import {
 import { withCatalogPrices } from "helpers/tokenCatalog";
 import {
   AssetIdentity,
+  ROUTER_SLIPPAGE_REASON_CODE,
   canonicalIdFromIdentity,
   classifyAssetIdentity,
   deriveLegUsd,
@@ -705,6 +707,29 @@ export const useSwapTransaction = ({
           submitFailure.quoteExpiredCodes = getQuoteExpiredOperationCodes(
             submitOutcome.resultCodes,
           );
+          // A rejected router swap is a trapped call to Horizon. Whether the
+          // router rejected it for slippage is only in the transaction's meta, so
+          // that is read (bounded) before the failure is classified; when it
+          // says so, the rejection is handled as an expired quote, like a classic
+          // swap's `op_under_dest_min`. Any doubt keeps the generic failure.
+          if (
+            !submitFailure.quoteExpiredCodes.length &&
+            (await isAggregatorSlippageRejection({
+              outcome: submitOutcome,
+              signedXDR,
+              network,
+            }))
+          ) {
+            submitFailure.quoteExpiredCodes = [ROUTER_SLIPPAGE_REASON_CODE];
+            // Put first so `pickReasonCode` reports it, not `function_trapped`.
+            submitFailure.resultCodes = {
+              ...submitOutcome.resultCodes,
+              operations: [
+                ROUTER_SLIPPAGE_REASON_CODE,
+                ...(submitOutcome.resultCodes?.operations ?? []),
+              ],
+            };
+          }
           throw submitFailure;
         }
 

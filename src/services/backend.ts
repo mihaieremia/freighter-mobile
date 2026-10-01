@@ -1558,3 +1558,67 @@ export const fetchCollectibles = async ({
     throw error;
   }
 };
+
+export interface SwapReceiptIdentity {
+  network: NETWORKS;
+  transactionHash: string;
+  viewer: string;
+  operationIndex: number;
+}
+
+export interface SwapReceiptResponse extends SwapReceiptIdentity {
+  status: "confirmed" | "unavailable";
+  tokenOut?: string;
+  receivedAtoms?: string;
+}
+
+const confirmedSwapReceipts = new Map<string, SwapReceiptResponse>();
+
+/** Cache only confirmed, identity-checked receipts. Cancellation belongs to each caller. */
+export const fetchSwapReceipt = async (
+  identity: SwapReceiptIdentity,
+  tokenOut: string,
+  signal?: AbortSignal,
+): Promise<SwapReceiptResponse> => {
+  if (signal?.aborted) throw new Error("Receipt request canceled");
+  const key = `${identity.network}:${identity.transactionHash}:${identity.operationIndex}:${identity.viewer}`;
+  const cached = confirmedSwapReceipts.get(key);
+  if (cached?.tokenOut === tokenOut) return cached;
+  const { data: response } = await freighterBackendV2.get<{
+    data: SwapReceiptResponse;
+  }>(`/swap/receipt/${identity.transactionHash}`, {
+    params: {
+      network: identity.network,
+      viewer: identity.viewer,
+      operationIndex: identity.operationIndex,
+    },
+    signal,
+  });
+  const data = response?.data;
+  if (
+    !data ||
+    data.network !== identity.network ||
+    data.transactionHash !== identity.transactionHash ||
+    data.viewer !== identity.viewer ||
+    data.operationIndex !== identity.operationIndex ||
+    !["confirmed", "unavailable"].includes(data.status)
+  )
+    throw new Error("Swap receipt identity mismatch");
+  if (
+    data.status === "confirmed" &&
+    (data.tokenOut !== tokenOut ||
+      typeof data.receivedAtoms !== "string" ||
+      data.receivedAtoms.length > 39 ||
+      !/^[1-9][0-9]*$/.test(data.receivedAtoms) ||
+      new BigNumber(data.receivedAtoms).gt(
+        "170141183460469231731687303715884105727",
+      ))
+  )
+    throw new Error("Invalid confirmed swap receipt");
+  if (data.status === "confirmed" && !signal?.aborted) {
+    if (!confirmedSwapReceipts.has(key) && confirmedSwapReceipts.size >= 100)
+      confirmedSwapReceipts.delete(confirmedSwapReceipts.keys().next().value!);
+    confirmedSwapReceipts.set(key, data);
+  }
+  return data;
+};

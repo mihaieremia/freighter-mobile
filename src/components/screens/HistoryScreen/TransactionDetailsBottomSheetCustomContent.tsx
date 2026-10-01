@@ -1,5 +1,6 @@
 import BigNumber from "bignumber.js";
 import { List, ListItemProps } from "components/List";
+import Spinner from "components/Spinner";
 import {
   renderActionIcon,
   renderIconComponent,
@@ -33,6 +34,7 @@ import { truncateAddress, isMuxedAccount } from "helpers/stellar";
 import useAppTranslation from "hooks/useAppTranslation";
 import { useClipboard } from "hooks/useClipboard";
 import useColors, { ThemeColors } from "hooks/useColors";
+import { HistoryReceiptStatus } from "hooks/useHistorySwapReceipt";
 import { useInAppBrowser } from "hooks/useInAppBrowser";
 import React, { useCallback, useMemo } from "react";
 import { View } from "react-native";
@@ -41,19 +43,24 @@ import { analytics } from "services/analytics";
 
 interface TransactionDetailsBottomSheetCustomContentProps {
   transactionDetails: TransactionDetails;
+  receiptStatus?: HistoryReceiptStatus;
+  onRetryReceipt?: () => void;
 }
 
 /**
  * Component for rendering individual asset diff rows
  */
 const AssetDiffRow: React.FC<{
-  diff: AssetDiffSummary;
+  diff: Pick<AssetDiffSummary, "amount" | "assetCode" | "isCredit">;
   themeColors: ThemeColors;
   isLast: boolean;
-}> = ({ diff, themeColors, isLast }) => {
+  baseUnits?: boolean;
+}> = ({ diff, themeColors, isLast, baseUnits }) => {
   const { t } = useAppTranslation();
   const prefix = diff.isCredit ? "+" : "-";
-  const formattedAmount = `${prefix}${formatTokenForDisplay(diff.amount, diff.assetCode)}`;
+  const formattedAmount = baseUnits
+    ? `${prefix}${diff.amount} ${t("history.transactionDetails.baseUnits")} ${diff.assetCode}`
+    : `${prefix}${formatTokenForDisplay(diff.amount, diff.assetCode)}`;
 
   return (
     <View
@@ -91,7 +98,7 @@ const AssetDiffRow: React.FC<{
  */
 export const TransactionDetailsBottomSheetCustomContent: React.FC<
   TransactionDetailsBottomSheetCustomContentProps
-> = ({ transactionDetails }) => {
+> = ({ transactionDetails, receiptStatus, onRetryReceipt }) => {
   const { themeColors } = useColors();
   const { t } = useAppTranslation();
   const { copyToClipboard } = useClipboard();
@@ -110,6 +117,13 @@ export const TransactionDetailsBottomSheetCustomContent: React.FC<
           transactionDetails.swapDetails?.destinationAmount ?? "0",
         )
       : "0";
+  // A swap whose received amount could not be read has no rate to show.
+  const hasSwapAmounts =
+    !!transactionDetails.swapDetails?.sourceAmount &&
+    !!transactionDetails.swapDetails?.destinationAmount &&
+    (!transactionDetails.swapReceipt ||
+      (transactionDetails.swapReceipt.sourceDecimals !== undefined &&
+        transactionDetails.swapReceipt.destinationDecimals !== undefined));
   const formattedSwapRate = new BigNumber(swapRate).toFixed(2, 1);
   const swapRateText = `1 ${transactionDetails.swapDetails?.sourceTokenCode} ≈ ${formatTokenForDisplay(formattedSwapRate, transactionDetails.swapDetails?.destinationTokenCode ?? "")}`;
 
@@ -184,7 +198,8 @@ export const TransactionDetailsBottomSheetCustomContent: React.FC<
               ),
             }
           : undefined,
-        transactionDetails.transactionType === TransactionType.SWAP
+        transactionDetails.transactionType === TransactionType.SWAP &&
+        hasSwapAmounts
           ? {
               icon: <Icon.Divide03 size={16} themeColor="gray" />,
               titleComponent: (
@@ -235,6 +250,7 @@ export const TransactionDetailsBottomSheetCustomContent: React.FC<
       fee,
       isSuccess,
       swapRateText,
+      hasSwapAmounts,
       t,
       transactionDetails.transactionType,
       handleCopyXdr,
@@ -277,9 +293,40 @@ export const TransactionDetailsBottomSheetCustomContent: React.FC<
               key={`${diff.isCredit ? "credit" : "debit"}:${diff.assetCode}:${diff.assetIssuer ?? "native"}:${diff.amount}`}
               diff={diff}
               themeColors={themeColors}
-              isLast={index === assetDiffs.length - 1}
+              isLast={
+                index === assetDiffs.length - 1 &&
+                (!transactionDetails.swapReceipt ||
+                  receiptStatus === "confirmed")
+              }
+              baseUnits={
+                !!transactionDetails.swapReceipt &&
+                (diff.isCredit
+                  ? transactionDetails.swapReceipt.destinationDecimals
+                  : transactionDetails.swapReceipt.sourceDecimals) === undefined
+              }
             />
           ))}
+
+          {transactionDetails.swapReceipt && receiptStatus !== "confirmed" && (
+            <View className="flex-row justify-between gap-2">
+              <Text md secondary>
+                {t("history.transactionHistory.received")}
+              </Text>
+              {receiptStatus === "loading" && (
+                <Spinner size="small" testID="swap-receipt-loading" />
+              )}
+              {receiptStatus === "unavailable" && (
+                <View className="items-end gap-2">
+                  <Text md secondary>
+                    {t("history.transactionDetails.receiptUnavailable")}
+                  </Text>
+                  <Button tertiary onPress={onRetryReceipt}>
+                    {t("history.transactionDetails.retryReceipt")}
+                  </Button>
+                </View>
+              )}
+            </View>
+          )}
 
           {shouldShowCounterparty && counterpartyAddress && (
             <View className="flex-row items-center justify-between pt-3 mt-3 border-t border-border-primary">
