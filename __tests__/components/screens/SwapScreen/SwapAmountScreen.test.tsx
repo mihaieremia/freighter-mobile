@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 /* eslint-disable @fnando/consistent-import/consistent-import */
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { fireEvent, within } from "@testing-library/react-native";
+import { fireEvent } from "@testing-library/react-native";
 import BigNumber from "bignumber.js";
 import SwapAmountScreen from "components/screens/SwapScreen/screens/SwapAmountScreen";
 import Icon from "components/sds/Icon";
@@ -404,25 +404,6 @@ const mockBalancesListReturn = (
 };
 
 describe("SwapAmountScreen", () => {
-  it("shows the quoted receive value and follows the sell-card fiat toggle", () => {
-    setSwapStoreState({ destinationAmount: "2" });
-
-    const { getByTestId } = renderWithProviders(
-      <SwapAmountScreen navigation={makeNavigation()} route={makeRoute()} />,
-    );
-    const receive = () => within(getByTestId("swap-receive-card"));
-
-    expect(receive().getByText("2.00")).toBeTruthy();
-    expect(receive().getByText("$0.60")).toBeTruthy();
-    expect(receive().queryByText("$0.00")).toBeNull();
-
-    fireEvent.press(getByTestId("swap-amount-fiat-toggle"));
-
-    expect(receive().getByText("$0.60")).toBeTruthy();
-    expect(receive().getByText("2.00 FTT")).toBeTruthy();
-    expect(receive().queryByText("$0.00")).toBeNull();
-  });
-
   beforeEach(() => {
     // Only clear call history; clearAllMocks would also drop the mock impls
     // set in the top-level jest.mock factories.
@@ -2040,6 +2021,55 @@ describe("SwapAmountScreen", () => {
           tokenIssuer: expect.any(String),
         }),
       );
+    });
+  });
+
+  describe("Receive card input", () => {
+    beforeEach(() => {
+      mockUseSwapPathFinding.mockClear();
+    });
+
+    const renderScreen = () =>
+      renderWithProviders(
+        <SwapAmountScreen navigation={makeNavigation()} route={makeRoute()} />,
+      );
+
+    const lastPathArgs = () =>
+      mockUseSwapPathFinding.mock.calls.at(-1)?.[0] as {
+        inputSide: string;
+        destinationInputAmount: string;
+        amountError: string | null;
+      };
+
+    it("finds the path for the typed receive amount", () => {
+      setSwapStoreState({
+        inputSide: "destination",
+        destinationInputAmount: "2.3",
+      });
+
+      renderScreen();
+
+      expect(lastPathArgs().inputSide).toBe("destination");
+      expect(lastPathArgs().destinationInputAmount).toBe("2.3");
+    });
+
+    it.each([
+      [
+        "stops the lookup on a balance error when the user typed the amount to sell",
+        { inputSide: "source" as const },
+        "Insufficient balance. Maximum spendable: 10 USDC",
+      ],
+      [
+        "does not let a balance error on the derived amount to sell stop the lookup that derives it",
+        { inputSide: "destination" as const, destinationInputAmount: "2.3" },
+        null,
+      ],
+    ])("%s", (_title, state, expectedAmountError) => {
+      setSwapStoreState({ ...state, sourceAmount: "999999" });
+
+      renderScreen();
+
+      expect(lastPathArgs().amountError).toBe(expectedAmountError);
     });
   });
 });

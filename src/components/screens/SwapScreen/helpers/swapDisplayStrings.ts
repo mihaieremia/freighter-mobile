@@ -3,10 +3,9 @@ import { DestinationTokenDescriptor } from "components/screens/SwapScreen/helper
 import { NATIVE_TOKEN_CODE } from "config/constants";
 import { PricedBalance, Token } from "config/types";
 import {
-  formatBalanceAmount,
-  formatFiatAmount,
   formatFiatInputDisplay,
   formatTokenForDisplay,
+  getBalanceDecimalTotal,
 } from "helpers/formatAmount";
 
 /**
@@ -65,79 +64,7 @@ export const buildDestinationPickerToken = ({
   return undefined;
 };
 
-/**
- * Receive-card amount strings: big = active editable mode value (token or
- * fiat); small = the other one. Both default to locale-formatted zero
- * values (e.g. "0,00" / "$0,00" on EU-style locales) when the
- * destination amount isn't computed yet.
- *
- * `destinationFiat === undefined` ambiguously covers two cases: the
- * amount is zero (no fiat to compute yet) AND the token has no known
- * price. `hasDestinationPrice` resolves that ambiguity — known price +
- * zero amount stays at "$0.00", unknown price renders "--".
- */
-export const buildReceiveTexts = ({
-  showFiatAmount,
-  destinationAmount,
-  destinationFiat,
-  hasDestinationPrice,
-  destinationTokenLabel,
-}: {
-  showFiatAmount: boolean;
-  destinationAmount: string;
-  destinationFiat: BigNumber | undefined;
-  hasDestinationPrice: boolean;
-  destinationTokenLabel: string;
-}): {
-  destinationAmountToken: string;
-  destinationFiatString: string;
-  receiveBigText: string;
-  receiveSmallText: string;
-} => {
-  // `destinationAmount` arrives from Horizon/the path-finder as a raw
-  // dot-notation string ("0.1228789"). Run it through
-  // formatTokenForDisplay so the rendered amount uses the device
-  // locale's decimal separator (e.g. "0,1228789" on EU-style locales).
-  const destinationAmountToken = formatTokenForDisplay(
-    destinationAmount || "0",
-  );
-  const destinationAmountWithCode = destinationTokenLabel
-    ? `${destinationAmountToken} ${destinationTokenLabel}`
-    : destinationAmountToken;
-  let destinationFiatString: string;
-  if (destinationFiat) {
-    destinationFiatString = formatFiatAmount(destinationFiat);
-  } else if (hasDestinationPrice) {
-    // Token has a known price, just no amount to multiply yet — show
-    // zero so the placeholder reads "you'd receive ~$0.00" rather
-    // than the "unknown price" sentinel.
-    destinationFiatString = formatFiatAmount("0");
-  } else {
-    destinationFiatString = "--";
-  }
-  return {
-    destinationAmountToken,
-    destinationFiatString,
-    receiveBigText: showFiatAmount
-      ? destinationFiatString
-      : destinationAmountToken,
-    receiveSmallText: showFiatAmount
-      ? destinationAmountWithCode
-      : destinationFiatString,
-  };
-};
-
-/**
- * Sell-card right-aligned available-balance text. Returns "" when no source
- * balance is selected so the caller can render null instead of an empty
- * label.
- *
- * `formatBalanceAmount` already produces "<amount> <code>" — don't append
- * the code a second time (caused the "123.45 USDC USDC" double-code bug).
- * The trailing " available" suffix matches the Send card's wording for
- * cross-flow consistency; pass the resolved i18n string in via
- * `availableLabel` so this helper stays pure.
- */
+/** spendableAmount is already scaled; formatting as a raw balance would scale it twice. */
 export const buildSourceBalanceRight = ({
   sourceBalance,
   sourceTokenSymbol,
@@ -150,9 +77,9 @@ export const buildSourceBalanceRight = ({
   availableLabel: string;
 }): string => {
   if (!sourceBalance) return "";
-  return `${formatBalanceAmount(
-    sourceBalance,
+  const amount = spendableAmount ?? getBalanceDecimalTotal(sourceBalance);
+  return `${formatTokenForDisplay(
+    amount,
     sourceBalance.tokenCode ?? sourceTokenSymbol,
-    spendableAmount ?? undefined,
   )} ${availableLabel}`;
 };
